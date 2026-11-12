@@ -30,7 +30,7 @@ from telegram.error import TelegramError
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
 
 import ia
-from biblioteca import ASPECTOS, Biblioteca, Resultado, es_estructura, leer_archivo
+from biblioteca import ASPECTOS, Biblioteca, Resultado, es_estructura, leer_archivo, normalizar
 
 logging.basicConfig(format="%(asctime)s %(levelname)s %(name)s: %(message)s", level=logging.INFO)
 logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -60,6 +60,9 @@ Escríbeme el nombre de una estructura o una pregunta. Por ejemplo:
 • riñón
 • ¿Cuáles son las relaciones del estómago?
 • origen embriológico del corazón
+• 5 detalles anatómicos del fémur
+• 3 figuras del corazón
+• tejido epitelial
 
 Si escribes solo la estructura (por ejemplo: corazón) voy a la parte del libro donde se trata y te envío sus figuras y, debajo, su anatomía, relaciones, histología, embriología y fisiología.
 
@@ -104,6 +107,68 @@ def recortar(texto: str, maximo: int = 900) -> str:
 
 def _parrafo(r: Resultado) -> str:
     return f"{r.etiqueta} {r.pagina}\n{recortar(r.texto)}"
+
+
+_NUMEROS = {"un": 1, "una": 1, "uno": 1, "dos": 2, "tres": 3, "cuatro": 4, "cinco": 5, "seis": 6, "siete": 7, "ocho": 8, "nueve": 9, "diez": 10}
+_DE_LISTA = (
+    "detalles caracteristicas datos puntos aspectos cosas elementos ideas rasgos particularidades funciones relaciones partes "
+    "detalle caracteristica dato punto aspecto cosa elemento idea rasgo particularidad funcion relacion parte"
+)
+_DE_FIGURA = (
+    "figuras fotos imagenes laminas esquemas cuadros dibujos ilustraciones fotografias "
+    "figura foto imagen lamina esquema cuadro dibujo ilustracion fotografia"
+)
+_PEDIDO = re.compile(
+    rf"\b(\d{{1,2}}|{'|'.join(_NUMEROS)})\s+({'|'.join(sorted((_DE_LISTA + ' ' + _DE_FIGURA).split(), key=len, reverse=True))})\b"
+    r"((?:\s+(?:mas\s+)?(?:anatomic|histologic|embriologic|fisiologic|funcional|important|principal|microscopic)\w*)*)"
+)
+_ADJETIVOS = {"anatomic": "anatomia", "histologic": "histologia", "microscopic": "histologia", "embriologic": "embriologia",
+              "fisiologic": "fisiologia", "funcional": "fisiologia"}
+
+
+def pedido(pregunta: str) -> tuple[str, int, str | None, str] | None:
+    """Entiende «5 detalles anatómicos del fémur» o «3 figuras del corazón».
+
+    Devuelve (clase: "lista" o "figuras", cantidad, aspecto, estructura), o None si no es un pedido así.
+    """
+    texto = normalizar(pregunta)
+    hallado = _PEDIDO.search(texto)
+    if not hallado:
+        return None
+    numero, nombre, adjetivos = hallado.groups()
+    cantidad = max(1, min(int(numero) if numero.isdigit() else _NUMEROS[numero], 10))
+    aspecto = {"funciones": "fisiologia", "funcion": "fisiologia", "relaciones": "relaciones", "relacion": "relaciones"}.get(nombre)
+    for raiz, clave in _ADJETIVOS.items():
+        if raiz in adjetivos:
+            aspecto = clave
+    estructura = " ".join((texto[: hallado.start()] + " " + texto[hallado.end() :]).split())
+    return ("figuras" if nombre in _DE_FIGURA.split() else "lista"), cantidad, aspecto, estructura
+
+
+def preparar_pedido(pregunta: str) -> tuple[str, list[Resultado], list[tuple[str, int]], int] | None:
+    """Respuesta a un pedido con cantidad. Devuelve (texto, párrafos, páginas de figuras, cuántas figuras)."""
+    clase, cantidad, aspecto, estructura = pedido(pregunta)
+    if clase == "figuras":
+        tema = biblioteca.tema(estructura)
+        if not tema:
+            return None
+        paginas = [(tema.titulo, p) for p in tema.paginas]
+        hay = len(biblioteca.figuras(paginas, estructura, cantidad))
+        texto = f"🖼 {pregunta.strip().upper()}\n📖 {tema.fuente}\n\n" + (
+            "Estas son las figuras de esa parte del libro." if hay >= cantidad
+            else f"En esa parte del libro solo hay {hay}." if hay
+            else "En esa parte del libro no hay figuras."
+        )
+        return texto, [biblioteca._resultado(i) for i in tema.indices[:10]], paginas, cantidad
+    hallado = biblioteca.oraciones(estructura, cantidad, aspecto)
+    if not hallado or not hallado[1]:
+        return None
+    tema, oraciones = hallado
+    lineas = [f"{n}. {recortar(r.texto, 400)} ({r.etiqueta} {r.pagina})" for n, r in enumerate(oraciones, 1)]
+    texto = f"📋 {pregunta.strip().upper()}\n📖 {tema.fuente}\n\n" + "\n\n".join(lineas)
+    if len(oraciones) < cantidad:
+        texto += f"\n\nSolo encontré {len(oraciones)} en esa parte del libro."
+    return texto, [biblioteca._resultado(i) for i in tema.indices[:10]], [(r.titulo, r.pagina) for r in oraciones], 2
 
 
 def preparar(pregunta: str, aspecto: str | None) -> tuple[str, list[Resultado], list[tuple[str, int]]] | None:
@@ -181,7 +246,13 @@ async def contestar(update: Update, context: ContextTypes.DEFAULT_TYPE, pregunta
         return
     context.user_data["ultima"] = pregunta
     await update.effective_chat.send_action(ChatAction.TYPING)
-    preparado = await asyncio.to_thread(preparar, pregunta, aspecto)
+    cuantas = 4
+    if aspecto is None and pedido(pregunta):
+        preparado = await asyncio.to_thread(preparar_pedido, pregunta)
+        if preparado:
+            *preparado, cuantas = preparado
+    else:
+        preparado = await asyncio.to_thread(preparar, pregunta, aspecto)
     if not preparado:
         await update.effective_chat.send_message(NO_ENCONTRE)
         return
@@ -189,7 +260,7 @@ async def contestar(update: Update, context: ContextTypes.DEFAULT_TYPE, pregunta
     respuesta = None
     if tutor and puede_usar_ia(update.effective_user.id):
         respuesta = await tutor.responder(pregunta, aspecto, parrafos)
-    await enviar_figuras(update, await asyncio.to_thread(biblioteca.figuras, paginas, pregunta))
+    await enviar_figuras(update, await asyncio.to_thread(biblioteca.figuras, paginas, pregunta, cuantas))
     await enviar(update, respuesta or texto, botones())
 
 

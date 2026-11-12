@@ -352,6 +352,27 @@ class Chat(unittest.TestCase):
         asyncio.run(bot.al_escribir(self.update(texto="órgano de la visión"), contexto))
         self.assertEqual(self.enviados[-1][0], bot.NO_ENCONTRE)
 
+    def test_pedidos_con_cantidad(self):
+        self.assertEqual(bot.pedido("Muéstrame 5 detalles anatómicos del corazón"), ("lista", 5, "anatomia", "muestrame del corazon"))
+        self.assertEqual(bot.pedido("tres figuras del tejido epitelial")[:3], ("figuras", 3, None))
+        self.assertEqual(bot.pedido("dos funciones del corazón")[:3], ("lista", 2, "fisiologia"))
+        self.assertIsNone(bot.pedido("¿Cuáles son las relaciones del estómago?"))
+
+        biblioteca_de_prueba(bot.biblioteca)
+        asyncio.run(bot.al_escribir(self.update(texto="Muéstrame 3 detalles anatómicos del corazón"), self.contexto()))
+        texto = self.enviados[-1][0]
+        self.assertTrue(texto.startswith("📋 MUÉSTRAME 3 DETALLES ANATÓMICOS DEL CORAZÓN\n📖 Tomo III, pág. 120–122\n\n1. El corazón es un órgano muscular hueco situado en el mediastino medio. (pág. 120)"))
+        self.assertIn("\n\n2. Tiene forma de cono, con una base, un vértice y tres caras. (pág. 120)", texto)
+        self.assertNotIn("4. ", texto)
+
+        self.fotos.clear()
+        asyncio.run(bot.al_escribir(self.update(texto="1 figura del corazón"), self.contexto()))
+        asyncio.run(bot.al_escribir(self.update(texto="5 figuras del corazón"), self.contexto()))
+        self.assertEqual(len(self.fotos), 3)  # una del primer pedido y las dos que hay en el segundo
+        self.assertIn("solo hay 2", self.enviados[-1][0])
+        asyncio.run(bot.al_escribir(self.update(texto="4 detalles del páncreas"), self.contexto()))
+        self.assertEqual(self.enviados[-1][0], bot.NO_ENCONTRE)
+
     def test_respaldo_con_copia_rapida(self):
         self.enviar_libro("Tomo III.txt", exportado(CORAZON_1, CORAZON_2))
         self.assertIn("✅ Tomo III: 2 páginas, 0 figuras", self.enviados[-2][0] + self.enviados[-1][0])

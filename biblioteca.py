@@ -23,7 +23,8 @@ VACIAS = set(
     "entre era es esa ese eso esta estan este esto fue ha hay la las le les lo los mas me mi "
     "muy no nos o para pero por que se sea ser si sin sobre son su sus tambien te tiene tienen "
     "un una uno unas unos y ya e u dime explica explicame describe describeme habla hablame "
-    "sobre quiero saber cuentame".split()
+    "sobre quiero saber cuentame muestra muestrame dame dime menciona mencioname enumera enumerame "
+    "ensename ponme pon sacame saca busca buscame necesito acerca cuales todo toda todos todas".split()
 )
 
 # Cada aspecto de una estructura: (nombre, palabras que lo nombran, palabras que lo acompañan).
@@ -547,6 +548,36 @@ class Biblioteca:
                 return None
             elegidos = self.del_aspecto(tema, consulta, aspecto, k)
             return (tema, [self._resultado(i) for i in sorted(elegidos)]) if elegidos else None
+
+    def oraciones(self, consulta: str, n: int, aspecto: str | None = None) -> tuple[Tema, list[Resultado]] | None:
+        """Las n oraciones que más dicen de una estructura (o de uno de sus aspectos), en el orden del libro."""
+        with self._candado:
+            tema = self.tema(consulta)
+            if not tema:
+                return None
+            principales = set(terminos(consulta))
+            fuertes = set(terminos(ASPECTOS[aspecto][1])) if aspecto in ASPECTOS else set()
+            debiles = set(terminos(ASPECTOS[aspecto][2])) if aspecto in ASPECTOS else set()
+            candidatas, vistas = [], set()
+            for orden, i in enumerate(tema.indices):
+                del_tema = bool(principales & set(self._cuentas[i]))  # el párrafo habla de la estructura
+                for oracion in re.split(r"(?<=[.!?])\s+(?=[A-ZÁÉÍÓÚÑ])", self._filas[i][3]):
+                    oracion = oracion.strip()
+                    if not 40 <= len(oracion) <= 400 or oracion in vistas:
+                        continue
+                    vistas.add(oracion)
+                    palabras = set(terminos(oracion))
+                    valor = 3 * bool(principales & palabras) + del_tema
+                    if aspecto in ASPECTOS:
+                        del_aspecto = 2 * len(fuertes & palabras) + len(debiles & palabras)
+                        if not del_aspecto:
+                            continue
+                        valor += del_aspecto
+                    if valor >= 3:
+                        candidatas.append((valor, -orden, len(candidatas), i, oracion))
+            mejores = sorted(sorted(candidatas, reverse=True)[:n], key=lambda c: c[2])
+            fila = self._filas
+            return tema, [Resultado(fila[i][0], fila[i][1], fila[i][2], oracion) for _, _, _, i, oracion in mejores]
 
     def figuras(self, paginas: list[tuple[str, int]], consulta: str = "", maximo: int = 4) -> list[tuple[str, bytes]]:
         """Figuras de esas páginas (título, página), con su pie. Primero las que nombran lo consultado."""
