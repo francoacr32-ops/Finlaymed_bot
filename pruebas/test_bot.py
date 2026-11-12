@@ -201,6 +201,58 @@ class Chat(unittest.TestCase):
             message=SimpleNamespace(text=texto, document=documento),
         )
 
+    def bot_falso(self, archivos):
+        """Un Telegram de mentira que recuerda el mensaje anclado y devuelve archivos por su id."""
+        chat = SimpleNamespace(pinned_message=None, ultimo=None)
+
+        async def send_message(admin, texto, disable_notification=False):
+            chat.ultimo = SimpleNamespace(message_id=1, text=texto)
+            return chat.ultimo
+
+        async def pin_chat_message(admin, message_id, disable_notification=False):
+            chat.pinned_message = chat.ultimo
+
+        async def unpin_all_chat_messages(admin):
+            chat.pinned_message = None
+
+        async def get_chat(admin):
+            return chat
+
+        async def get_file(file_id):
+            async def download_as_bytearray():
+                return bytearray(archivos[file_id])
+
+            return SimpleNamespace(download_as_bytearray=download_as_bytearray)
+
+        return SimpleNamespace(
+            send_message=send_message, pin_chat_message=pin_chat_message,
+            unpin_all_chat_messages=unpin_all_chat_messages, get_chat=get_chat, get_file=get_file,
+        )
+
+    def test_respaldo_y_restauracion_tras_perder_el_disco(self):
+        txt = f"=== pág. 10 ===\n{RINON}\n".encode()
+        falso = self.bot_falso({"id-1": txt})
+        contexto = SimpleNamespace(user_data={}, args=[], bot=falso)
+        documento = self.documento("Morfo III.txt", txt)
+        documento.file_id = "id-1"
+        asyncio.run(bot.al_recibir_archivo(self.update(usuario=7, documento=documento), contexto))
+        anclado = asyncio.run(falso.get_chat(7)).pinned_message.text
+        self.assertTrue(anclado.startswith(bot.MARCA))
+        self.assertIn("id-1", anclado)
+
+        # El servidor reinicia y pierde el disco: la biblioteca queda vacía.
+        bot.biblioteca.borrar(bot.biblioteca.libros()[0][0])
+        self.assertEqual(bot.biblioteca.archivos(), [])
+        asyncio.run(bot.restaurar(falso))
+        self.assertEqual([titulo for _, titulo, *_ in bot.biblioteca.libros()], ["Morfo III"])
+        self.assertEqual(bot.biblioteca.archivos(), [["id-1", "Morfo III.txt"]])
+        self.assertFalse(bot.estado["restaurando"])
+
+        # Al borrar el libro, el respaldo se actualiza y ya no lo trae.
+        contexto.args = [str(bot.biblioteca.libros()[0][0])]
+        asyncio.run(bot.cmd_borrar(self.update(usuario=7), contexto))
+        self.assertNotIn("id-1", asyncio.run(falso.get_chat(7)).pinned_message.text)
+
     def documento(self, nombre, datos, tam=None):
         async def download_as_bytearray():
             return bytearray(datos)
@@ -208,10 +260,10 @@ class Chat(unittest.TestCase):
         async def get_file():
             return SimpleNamespace(download_as_bytearray=download_as_bytearray)
 
-        return SimpleNamespace(file_name=nombre, file_size=tam or len(datos), get_file=get_file)
+        return SimpleNamespace(file_name=nombre, file_size=tam or len(datos), get_file=get_file, file_id=f"id-{nombre}")
 
     def test_flujo_completo(self):
-        contexto = SimpleNamespace(user_data={}, args=[])
+        contexto = SimpleNamespace(user_data={}, args=[], bot=self.bot_falso({}))
         txt = f"=== pág. 10 ===\n{RINON}\n=== pág. 11 ===\n{RELACIONES}\n".encode()
 
         asyncio.run(bot.al_escribir(self.update(texto="riñón"), contexto))
@@ -240,7 +292,7 @@ class Chat(unittest.TestCase):
         self.assertEqual(self.enviados[-1][0], bot.NO_ENCONTRE)
 
     def test_estructura_con_fotos_y_apartados(self):
-        contexto = SimpleNamespace(user_data={}, args=[])
+        contexto = SimpleNamespace(user_data={}, args=[], bot=self.bot_falso({}))
         pdf = pdf_minimo("El ojo u organo de la vision esta situado en la orbita", figuras=((640, 480), (500, 400)))
         asyncio.run(bot.al_recibir_archivo(self.update(usuario=7, documento=self.documento("Morfo II.pdf", pdf)), contexto))
         self.assertIn("✅ Morfo II: 1 páginas, 2 figuras", self.enviados[-1][0])

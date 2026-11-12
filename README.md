@@ -59,9 +59,24 @@ docker run -d --restart always -v finlaymed:/datos \
 
 **El token y las claves van en las variables del servidor, nunca en este repositorio.**
 
-La biblioteca se guarda en `DATA_DIR`. Si el servidor borra el disco en cada
-reinicio (pasa en varios planes gratuitos), usa un volumen persistente o
-`LIBROS_URLS`, que vuelve a cargar los libros al arrancar.
+La biblioteca se guarda en `DATA_DIR`. Muchos planes gratuitos borran el disco en
+cada reinicio; para eso el bot lleva un **respaldo automático**: cada vez que el
+administrador le envía un libro, deja anclado en ese chat un mensaje con la lista
+de archivos. Si al arrancar la biblioteca está vacía, el bot lee ese mensaje, vuelve
+a pedirle los archivos a Telegram y los carga solo (tarda unos minutos).
+**No borres ni desancles ese mensaje.**
+
+### Render (gratis)
+
+1. Entra a <https://render.com> y regístrate con tu cuenta de GitHub.
+2. **New → Web Service** → elige el repositorio `Finlaymed_bot`. Render detecta el
+   `Dockerfile`. En **Instance Type** elige **Free**.
+3. En **Environment Variables** agrega `TELEGRAM_TOKEN` (y después `ADMIN_IDS`).
+4. **Create Web Service**. Cuando termine verás una dirección `https://….onrender.com`
+   que muestra «Finlaymed_bot en marcha».
+5. El plan gratuito apaga el servicio tras 15 minutos sin visitas. Para evitarlo,
+   crea una cuenta gratis en <https://uptimerobot.com> y agrega un monitor **HTTP(s)**
+   a esa dirección, cada 5 minutos.
 
 ## 3. Cargar los libros
 

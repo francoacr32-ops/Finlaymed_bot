@@ -14,6 +14,7 @@ Variables de entorno:
 
 import asyncio
 import datetime
+import json
 import logging
 import os
 import threading
@@ -24,6 +25,7 @@ from pathlib import Path
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto, Update
 from telegram.constants import ChatAction
+from telegram.error import TelegramError
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
 
 import ia
@@ -44,6 +46,11 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 biblioteca = Biblioteca(str(DATA_DIR / "biblioteca.db"))
 tutor = ia.Tutor() if ia.disponible() else None
 _usos: dict[tuple[int, datetime.date], int] = {}
+
+# El respaldo es un mensaje anclado en el chat del administrador con los archivos enviados.
+# Sirve para volver a cargar los libros solo cuando el servidor borra el disco al reiniciar.
+MARCA = "📌 Respaldo de la biblioteca de Finlaymed_bot. No borres ni desancles este mensaje.\n"
+estado = {"restaurando": False, "tarea": None}
 
 AYUDA = """Soy el bot de Morfofisiología. Respondo con lo que dicen los libros de Morfofisiología I, II y III, y te digo de qué libro y página sale.
 
@@ -141,7 +148,11 @@ async def contestar(update: Update, context: ContextTypes.DEFAULT_TYPE, pregunta
         await update.effective_chat.send_message("Escribe la estructura después del comando. Ejemplo: /relaciones estómago")
         return
     if not biblioteca.libros():
-        await update.effective_chat.send_message("Todavía no tengo libros cargados. El administrador debe enviármelos.")
+        await update.effective_chat.send_message(
+            "Estoy cargando los libros después de un reinicio. Escríbeme de nuevo en unos minutos."
+            if estado["restaurando"]
+            else "Todavía no tengo libros cargados. El administrador debe enviármelos."
+        )
         return
     context.user_data["ultima"] = pregunta
     await update.effective_chat.send_action(ChatAction.TYPING)
@@ -195,6 +206,8 @@ async def cmd_borrar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         await update.effective_chat.send_message("Uso: /borrar número (el número sale en /libros)")
         return
     titulo = await asyncio.to_thread(biblioteca.borrar, int(context.args[0]))
+    if titulo:
+        await respaldar(context.bot)
     await update.effective_chat.send_message(f"Borrado: {titulo}" if titulo else "No hay un libro con ese número.")
 
 
@@ -233,7 +246,12 @@ async def al_recibir_archivo(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await update.effective_chat.send_message(f"Leyendo «{documento.file_name}»…")
     archivo = await documento.get_file()
     datos = bytes(await archivo.download_as_bytearray())
-    await update.effective_chat.send_message(await asyncio.to_thread(cargar, documento.file_name or "libro", datos))
+    nombre = documento.file_name or "libro"
+    mensaje, titulos = await asyncio.to_thread(cargar, nombre, datos)
+    await update.effective_chat.send_message(mensaje)
+    if titulos:
+        biblioteca.guardar_archivo(documento.file_id, nombre, titulos)
+        await respaldar(context.bot)
 
 
 async def al_fallar(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -245,23 +263,73 @@ async def al_fallar(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
 # ---------- carga de libros ----------
 
 
-def cargar(nombre: str, datos: bytes) -> str:
-    """Guarda en la biblioteca los libros de un archivo y devuelve un mensaje con el resultado."""
+async def respaldar(bot) -> None:
+    """Deja anclada, en el chat de cada administrador, la lista de archivos de la biblioteca."""
+    texto = MARCA + json.dumps(biblioteca.archivos(), ensure_ascii=False)
+    if len(texto) > 4096:
+        registro.warning("El respaldo no cabe en un mensaje: hay demasiados archivos")
+        return
+    for admin in ADMINS:
+        try:
+            await bot.unpin_all_chat_messages(admin)
+            mensaje = await bot.send_message(admin, texto, disable_notification=True)
+            await bot.pin_chat_message(admin, mensaje.message_id, disable_notification=True)
+        except TelegramError as error:
+            registro.warning("No se pudo dejar el respaldo a %s: %s", admin, error)
+
+
+async def restaurar(bot) -> None:
+    """Si la biblioteca está vacía, vuelve a cargar los archivos del respaldo anclado."""
+    estado["restaurando"] = True
+    try:
+        for admin in ADMINS:
+            try:
+                anclado = (await bot.get_chat(admin)).pinned_message
+            except TelegramError:
+                continue
+            if not anclado or not (anclado.text or "").startswith(MARCA):
+                continue
+            for file_id, nombre in json.loads(anclado.text[len(MARCA) :]):
+                try:
+                    archivo = await bot.get_file(file_id)
+                    datos = bytes(await archivo.download_as_bytearray())
+                except TelegramError as error:
+                    registro.error("No se pudo recuperar %s: %s", nombre, error)
+                    continue
+                mensaje, titulos = await asyncio.to_thread(cargar, nombre, datos)
+                registro.info("Restaurado %s:\n%s", nombre, mensaje)
+                if titulos:
+                    biblioteca.guardar_archivo(file_id, nombre, titulos)
+            return
+    except Exception:
+        registro.exception("Falló la restauración de la biblioteca")
+    finally:
+        estado["restaurando"] = False
+
+
+async def al_arrancar(aplicacion: Application) -> None:
+    if not biblioteca.libros() and ADMINS:
+        estado["tarea"] = asyncio.create_task(restaurar(aplicacion.bot))
+
+
+def cargar(nombre: str, datos: bytes) -> tuple[str, list[str]]:
+    """Guarda en la biblioteca los libros de un archivo. Devuelve el mensaje y los títulos guardados."""
     try:
         libros = leer_archivo(nombre, datos)
     except ValueError as error:
-        return str(error)
+        return str(error), []
     except Exception:
         registro.exception("No se pudo leer %s", nombre)
-        return f"No pude leer «{nombre}». Puede estar dañado o protegido con contraseña."
-    lineas = []
+        return f"No pude leer «{nombre}». Puede estar dañado o protegido con contraseña.", []
+    lineas, titulos = [], []
     for titulo, etiqueta, paginas, figuras in libros:
         try:
             biblioteca.agregar(titulo, paginas, etiqueta, figuras)
+            titulos.append(titulo)
             lineas.append(f"✅ {titulo}: {len(paginas)} páginas, {len(figuras)} figuras")
         except ValueError as error:
             lineas.append(f"⚠️ {error}")
-    return "\n".join(lineas) or "Ese archivo no trae libros."
+    return "\n".join(lineas) or "Ese archivo no trae libros.", titulos
 
 
 def cargar_al_arrancar() -> None:
@@ -288,7 +356,7 @@ def cargar_al_arrancar() -> None:
         except OSError as error:
             registro.error("No se pudo abrir %s: %s", origen, error)
             continue
-        registro.info("Carga de %s:\n%s", nombre, cargar(nombre, datos))
+        registro.info("Carga de %s:\n%s", nombre, cargar(nombre, datos)[0])
         hechos.add(marca)
     cargados.write_text("\n".join(sorted(hechos)), encoding="utf-8")
 
@@ -312,7 +380,7 @@ def abrir_puerto(puerto: int) -> None:
 
 
 def crear_aplicacion(token: str) -> Application:
-    aplicacion = Application.builder().token(token).build()
+    aplicacion = Application.builder().token(token).post_init(al_arrancar).build()
     aplicacion.add_handler(CommandHandler(["start", "ayuda", "help"], cmd_start))
     aplicacion.add_handler(CommandHandler("id", cmd_id))
     aplicacion.add_handler(CommandHandler("libros", cmd_libros))

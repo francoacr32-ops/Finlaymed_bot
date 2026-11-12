@@ -115,6 +115,7 @@ class Biblioteca:
             CREATE TABLE IF NOT EXISTS figuras(
                 id INTEGER PRIMARY KEY, libro_id INTEGER, pagina INTEGER, datos BLOB);
             CREATE INDEX IF NOT EXISTS figuras_pagina ON figuras(libro_id, pagina);
+            CREATE TABLE IF NOT EXISTS archivos(file_id TEXT PRIMARY KEY, nombre TEXT, titulos TEXT);
             """
         )
         self._reindexar()
@@ -170,9 +171,29 @@ class Biblioteca:
             if not fila:
                 return None
             self._borrar_por_titulo(fila[0])
+            self._olvidar_archivos_de(fila[0])
             self._db.commit()
             self._reindexar()
             return fila[0]
+
+    # ---------- archivos de Telegram (para el respaldo) ----------
+
+    def guardar_archivo(self, file_id: str, nombre: str, titulos: list[str]) -> None:
+        """Recuerda de qué archivo de Telegram salieron esos libros."""
+        with self._candado:
+            for titulo in titulos:
+                self._olvidar_archivos_de(titulo)
+            self._db.execute("INSERT OR REPLACE INTO archivos VALUES (?, ?, ?)", (file_id, nombre, "\n".join(titulos)))
+            self._db.commit()
+
+    def archivos(self) -> list[list[str]]:
+        with self._candado:
+            return [list(f) for f in self._db.execute("SELECT file_id, nombre FROM archivos ORDER BY rowid")]
+
+    def _olvidar_archivos_de(self, titulo: str) -> None:
+        for file_id, titulos in self._db.execute("SELECT file_id, titulos FROM archivos").fetchall():
+            if titulo in titulos.split("\n"):
+                self._db.execute("DELETE FROM archivos WHERE file_id = ?", (file_id,))
 
     def _borrar_por_titulo(self, titulo: str) -> None:
         self._db.execute("DELETE FROM figuras WHERE libro_id IN (SELECT id FROM libros WHERE titulo = ?)", (titulo,))
