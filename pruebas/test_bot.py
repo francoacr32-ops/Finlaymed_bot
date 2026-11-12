@@ -1,6 +1,7 @@
 """Pruebas sin conexión: python -m unittest discover pruebas"""
 
 import asyncio
+import io
 import json
 import os
 import sys
@@ -29,24 +30,43 @@ EMBRIO = "El riñón definitivo o metanefros deriva del mesodermo intermedio y a
 CORAZON = "El corazón es un órgano muscular hueco situado en el mediastino medio. Las arterias coronarias irrigan el miocardio."
 
 
-def pdf_minimo(texto: str) -> bytes:
-    """Un PDF de una página con una línea de texto."""
-    contenido = f"BT /F1 12 Tf 50 700 Td ({texto}) Tj ET".encode("latin-1")
+def jpeg(ancho: int, alto: int) -> bytes:
+    from PIL import Image
+
+    memoria = io.BytesIO()
+    Image.new("RGB", (ancho, alto), (200, 60, 60)).save(memoria, "JPEG")
+    return memoria.getvalue()
+
+
+def pdf_minimo(texto: str, figuras: tuple[tuple[int, int], ...] = ()) -> bytes:
+    """Un PDF de una página con una línea de texto y, si se piden, imágenes de esos tamaños."""
+    dibujo = "".join(f" q 200 0 0 150 50 {400 - 160 * i} cm /Im{i} Do Q" for i in range(len(figuras)))
+    contenido = f"BT /F1 12 Tf 50 700 Td ({texto}) Tj ET{dibujo}".encode("latin-1")
+    xobjetos = " ".join(f"/Im{i} {6 + i} 0 R" for i in range(len(figuras)))
     objetos = [
         b"<< /Type /Catalog /Pages 2 0 R >>",
         b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
         b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R "
-        b"/Resources << /Font << /F1 5 0 R >> >> >>",
+        b"/Resources << /Font << /F1 5 0 R >> /XObject << " + xobjetos.encode() + b" >> >> >>",
         b"<< /Length %d >>\nstream\n" % len(contenido) + contenido + b"\nendstream",
         b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>",
     ]
+    for ancho, alto in figuras:
+        datos = jpeg(ancho, alto)
+        objetos.append(
+            b"<< /Type /XObject /Subtype /Image /Width %d /Height %d /ColorSpace /DeviceRGB "
+            b"/BitsPerComponent 8 /Filter /DCTDecode /Length %d >>\nstream\n" % (ancho, alto, len(datos))
+            + datos
+            + b"\nendstream"
+        )
     salida, posiciones = b"%PDF-1.4\n", []
     for i, objeto in enumerate(objetos, 1):
         posiciones.append(len(salida))
         salida += b"%d 0 obj\n" % i + objeto + b"\nendobj\n"
     inicio = len(salida)
-    salida += b"xref\n0 6\n0000000000 65535 f \n" + b"".join(b"%010d 00000 n \n" % p for p in posiciones)
-    return salida + b"trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n" % inicio
+    total = len(objetos) + 1
+    salida += b"xref\n0 %d\n0000000000 65535 f \n" % total + b"".join(b"%010d 00000 n \n" % p for p in posiciones)
+    return salida + b"trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n" % (total, inicio)
 
 
 class Texto(unittest.TestCase):
@@ -91,6 +111,25 @@ class Busqueda(unittest.TestCase):
         self.assertEqual(self.b.borrar(numero), "Morfofisiología II")
         self.assertEqual(self.b.buscar("páncreas"), [])
 
+    def test_resumen_de_una_estructura_trae_cada_aspecto(self):
+        secciones = dict(self.b.resumen("riñón"))
+        self.assertEqual(secciones["relaciones"].pagina, 11)
+        self.assertEqual(secciones["embriologia"].pagina, 12)
+        self.assertEqual(secciones["anatomia"].pagina, 10)
+        self.assertNotIn("histologia", secciones)  # el libro de prueba no trae histología del riñón
+
+    def test_distingue_estructura_de_pregunta(self):
+        self.assertTrue(bib.es_estructura("órgano de la visión"))
+        self.assertFalse(bib.es_estructura("¿Dónde está el riñón?"))
+        self.assertFalse(bib.es_estructura("origen embriológico del corazón"))
+
+    def test_figuras_de_la_pagina(self):
+        self.b.agregar("Atlas", [(5, RINON)], figuras=[(5, b"uno"), (5, b"dos"), (9, b"otra")])
+        figuras = self.b.figuras(self.b.buscar("riñón polos"))
+        self.assertEqual(figuras, [("Atlas, pág. 5", b"uno"), ("Atlas, pág. 5", b"dos")])
+        self.b.borrar([i for i, titulo, *_ in self.b.libros() if titulo == "Atlas"][0])
+        self.assertEqual(self.b._db.execute("SELECT COUNT(*) FROM figuras").fetchone()[0], 0)
+
     def test_libro_sin_texto_se_rechaza(self):
         with self.assertRaises(ValueError):
             self.b.agregar("Escaneado", [(1, ""), (2, "   ")])
@@ -98,16 +137,22 @@ class Busqueda(unittest.TestCase):
 
 class Archivos(unittest.TestCase):
     def test_pdf(self):
-        ((titulo, etiqueta, paginas),) = bib.leer_archivo("Morfo_I.pdf", pdf_minimo("El femur es un hueso largo"))
+        pdf = pdf_minimo("El femur es un hueso largo", figuras=((640, 480), (40, 40), (900, 20)))
+        ((titulo, etiqueta, paginas, figuras),) = bib.leer_archivo("Morfo_I.pdf", pdf)
         self.assertEqual((titulo, etiqueta, paginas[0][0]), ("Morfo I", "pág.", 1))
         self.assertIn("femur", paginas[0][1])
+        # Solo queda la figura de verdad: el icono y la línea se descartan.
+        self.assertEqual([n for n, _ in figuras], [1])
+        from PIL import Image
+
+        self.assertEqual(Image.open(io.BytesIO(figuras[0][1])).size, (640, 480))
 
     def test_texto_exportado_de_finlay(self):
         txt = (
             "FINLAY — TEXTO EXTRAÍDO\nDocumento: Morfofisiología I.pdf\nTipo: libro\nPáginas: 2\n"
             "\n=== pág. 7 ===\nLa célula es la unidad.\n\n=== pág. 8 ===\nEl núcleo contiene el ADN.\n"
         )
-        ((titulo, etiqueta, paginas),) = bib.leer_archivo("export.txt", txt.encode())
+        ((titulo, etiqueta, paginas, _),) = bib.leer_archivo("export.txt", txt.encode())
         self.assertEqual((titulo, etiqueta), ("Morfofisiología I", "pág."))
         self.assertEqual([n for n, _ in paginas], [7, 8])
         self.assertIn("núcleo", paginas[1][1])
@@ -118,7 +163,7 @@ class Archivos(unittest.TestCase):
             "materiales": [{"nombre": "Conferencia 3", "etiqueta": "diap.", "paginas": [{"n": 1, "texto": "Membrana"}]}],
         }
         self.assertEqual(
-            bib.leer_archivo("p.json", json.dumps(paquete).encode()), [("Conferencia 3", "diap.", [(1, "Membrana")])]
+            bib.leer_archivo("p.json", json.dumps(paquete).encode()), [("Conferencia 3", "diap.", [(1, "Membrana")], [])]
         )
         with self.assertRaises(ValueError):
             bib.leer_archivo("otro.json", b'{"a": 1}')
@@ -133,6 +178,7 @@ class Chat(unittest.TestCase):
         for numero, *_ in bot.biblioteca.libros():
             bot.biblioteca.borrar(numero)
         self.enviados = []
+        self.fotos = []
 
     def update(self, usuario=1, texto=None, documento=None):
         async def send_message(texto, reply_markup=None):
@@ -141,9 +187,17 @@ class Chat(unittest.TestCase):
         async def send_action(accion):
             pass
 
+        async def send_photo(foto, caption=None):
+            self.fotos.append(caption)
+
+        async def send_media_group(grupo):
+            self.fotos += [m.caption for m in grupo]
+
         return SimpleNamespace(
             effective_user=SimpleNamespace(id=usuario),
-            effective_chat=SimpleNamespace(send_message=send_message, send_action=send_action),
+            effective_chat=SimpleNamespace(
+                send_message=send_message, send_action=send_action, send_photo=send_photo, send_media_group=send_media_group
+            ),
             message=SimpleNamespace(text=texto, document=documento),
         )
 
@@ -168,7 +222,7 @@ class Chat(unittest.TestCase):
         self.assertEqual(bot.biblioteca.libros(), [])
 
         asyncio.run(bot.al_recibir_archivo(self.update(usuario=7, documento=self.documento("Morfo III.txt", txt)), contexto))
-        self.assertIn("✅ Morfo III: 2 páginas", self.enviados[-1][0])
+        self.assertIn("✅ Morfo III: 2 páginas, 0 figuras", self.enviados[-1][0])
 
         asyncio.run(bot.al_recibir_archivo(self.update(usuario=7, documento=self.documento("g.pdf", b"", 30_000_000)), contexto))
         self.assertIn("20 MB", self.enviados[-1][0])
@@ -184,6 +238,25 @@ class Chat(unittest.TestCase):
 
         asyncio.run(bot.al_escribir(self.update(texto="páncreas"), contexto))
         self.assertEqual(self.enviados[-1][0], bot.NO_ENCONTRE)
+
+    def test_estructura_con_fotos_y_apartados(self):
+        contexto = SimpleNamespace(user_data={}, args=[])
+        pdf = pdf_minimo("El ojo u organo de la vision esta situado en la orbita", figuras=((640, 480), (500, 400)))
+        asyncio.run(bot.al_recibir_archivo(self.update(usuario=7, documento=self.documento("Morfo II.pdf", pdf)), contexto))
+        self.assertIn("✅ Morfo II: 1 páginas, 2 figuras", self.enviados[-1][0])
+        bot.biblioteca.agregar("Morfo I", [(30, "El ojo deriva del ectodermo en la cuarta semana del desarrollo."),
+                                           (31, "La retina del ojo tiene diez capas de celulas.")])
+
+        asyncio.run(bot.al_escribir(self.update(texto="órgano de la visión"), contexto))
+        self.assertEqual(self.fotos, ["📖 Morfo II, pág. 1", "📖 Morfo II, pág. 1"])
+        self.assertTrue(self.enviados[-1][0].startswith("ANATOMÍA\n📖 Morfo II, pág. 1"))
+
+        self.fotos.clear()
+        asyncio.run(bot.al_escribir(self.update(texto="ojo"), contexto))
+        texto = self.enviados[-1][0]
+        for titulo in ("ANATOMÍA", "HISTOLOGÍA\n📖 Morfo I, pág. 31", "EMBRIOLOGÍA\n📖 Morfo I, pág. 30"):
+            self.assertIn(titulo, texto)
+        self.assertEqual(len(self.fotos), 2)
 
     def test_mensaje_largo_se_parte(self):
         asyncio.run(bot.enviar(self.update(), "línea de texto\n" * 700, "teclado"))

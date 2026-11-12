@@ -22,12 +22,12 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto, Update
 from telegram.constants import ChatAction
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
 
 import ia
-from biblioteca import ASPECTOS, Biblioteca, Resultado, leer_archivo
+from biblioteca import ASPECTOS, Biblioteca, Resultado, es_estructura, leer_archivo
 
 logging.basicConfig(format="%(asctime)s %(levelname)s %(name)s: %(message)s", level=logging.INFO)
 logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -52,6 +52,8 @@ Escríbeme el nombre de una estructura o una pregunta. Por ejemplo:
 • ¿Cuáles son las relaciones del estómago?
 • origen embriológico del corazón
 
+Si escribes solo la estructura (por ejemplo: órgano de la visión) te envío las figuras del libro y, debajo, su anatomía, relaciones, histología, embriología y fisiología.
+
 Debajo de cada respuesta hay botones para pedir un aspecto concreto de lo mismo. También puedes escribirlo directamente:
 /anatomia hígado
 /relaciones hígado
@@ -66,7 +68,7 @@ Debajo de cada respuesta hay botones para pedir un aspecto concreto de lo mismo.
 AYUDA_ADMIN = """
 
 Administrador:
-• Envíame un libro como archivo (PDF, .txt de «Exportar texto» de Finlay, o paquete de Finlay .json/.zip) y lo agrego. Máximo 20 MB por archivo.
+• Envíame un libro como archivo (PDF, .txt de «Exportar texto» de Finlay, o paquete de Finlay .json/.zip) y lo agrego. Máximo 20 MB por archivo. Las figuras solo salen de los PDF.
 • /borrar número — quita un libro (el número sale en /libros)."""
 
 
@@ -82,13 +84,31 @@ def botones() -> InlineKeyboardMarkup:
     )
 
 
+def _cita(r: Resultado) -> str:
+    texto = r.texto if len(r.texto) <= 900 else r.texto[:900].rsplit(" ", 1)[0] + "…"
+    return f"📖 {r.fuente}\n{texto}"
+
+
 def con_fragmentos(resultados: list[Resultado]) -> str:
     """Respuesta sin IA: los mejores fragmentos tal como están en el libro."""
-    partes = []
-    for r in resultados[:3]:
-        texto = r.texto if len(r.texto) <= 900 else r.texto[:900].rsplit(" ", 1)[0] + "…"
-        partes.append(f"📖 {r.fuente}\n{texto}")
-    return "\n\n".join(partes)
+    return "\n\n".join(_cita(r) for r in resultados[:3])
+
+
+def con_secciones(secciones: list[tuple[str, Resultado]]) -> str:
+    """Respuesta sin IA para una estructura: un apartado por aspecto."""
+    return "\n\n".join(f"{ASPECTOS[a][0].upper()}\n{_cita(r)}" for a, r in secciones)
+
+
+async def enviar_figuras(update: Update, figuras: list[tuple[str, bytes]]) -> None:
+    try:
+        if len(figuras) == 1:
+            await update.effective_chat.send_photo(figuras[0][1], caption=f"📖 {figuras[0][0]}")
+        elif figuras:
+            await update.effective_chat.send_media_group(
+                [InputMediaPhoto(datos, caption=f"📖 {fuente}") for fuente, datos in figuras]
+            )
+    except Exception:  # una figura que Telegram no acepta no debe dejar al estudiante sin respuesta
+        registro.exception("No se pudieron enviar las figuras")
 
 
 def puede_usar_ia(usuario: int) -> bool:
@@ -129,10 +149,22 @@ async def contestar(update: Update, context: ContextTypes.DEFAULT_TYPE, pregunta
     if not resultados:
         await update.effective_chat.send_message(NO_ENCONTRE)
         return
+    # Solo el nombre de una estructura: se responde con todos sus aspectos.
+    secciones = []
+    if aspecto is None and es_estructura(pregunta):
+        secciones = await asyncio.to_thread(biblioteca.resumen, pregunta)
+    if secciones:
+        de_secciones = [r for _, r in secciones]
+        textos = {r.texto for r in de_secciones}
+        resultados = de_secciones + [r for r in resultados if r.texto not in textos][:4]
+        mostrados = de_secciones
+    else:
+        mostrados = resultados[:3]
     respuesta = None
     if tutor and puede_usar_ia(update.effective_user.id):
         respuesta = await tutor.responder(pregunta, aspecto, resultados)
-    await enviar(update, respuesta or con_fragmentos(resultados), botones())
+    await enviar_figuras(update, await asyncio.to_thread(biblioteca.figuras, mostrados))
+    await enviar(update, respuesta or (con_secciones(secciones) if secciones else con_fragmentos(resultados)), botones())
 
 
 # ---------- comandos ----------
@@ -151,7 +183,7 @@ async def cmd_libros(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     if not libros:
         await update.effective_chat.send_message("Todavía no tengo libros cargados.")
         return
-    lineas = [f"{i}. {titulo} ({paginas} páginas)" for i, titulo, paginas, _ in libros]
+    lineas = [f"{i}. {titulo} ({paginas} páginas, {figuras} figuras)" for i, titulo, paginas, figuras in libros]
     await enviar(update, "Libros cargados:\n" + "\n".join(lineas))
 
 
@@ -223,10 +255,10 @@ def cargar(nombre: str, datos: bytes) -> str:
         registro.exception("No se pudo leer %s", nombre)
         return f"No pude leer «{nombre}». Puede estar dañado o protegido con contraseña."
     lineas = []
-    for titulo, etiqueta, paginas in libros:
+    for titulo, etiqueta, paginas, figuras in libros:
         try:
-            biblioteca.agregar(titulo, paginas, etiqueta)
-            lineas.append(f"✅ {titulo}: {len(paginas)} páginas")
+            biblioteca.agregar(titulo, paginas, etiqueta, figuras)
+            lineas.append(f"✅ {titulo}: {len(paginas)} páginas, {len(figuras)} figuras")
         except ValueError as error:
             lineas.append(f"⚠️ {error}")
     return "\n".join(lineas) or "Ese archivo no trae libros."

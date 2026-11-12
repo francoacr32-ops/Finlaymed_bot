@@ -5,6 +5,7 @@ Cada libro se guarda por páginas, partido en fragmentos. La búsqueda usa BM25
 libro y de qué página sale.
 """
 
+import hashlib
 import io
 import json
 import math
@@ -26,7 +27,7 @@ VACIAS = set(
 
 # Palabras que acercan la búsqueda a cada aspecto de una estructura.
 ASPECTOS = {
-    "anatomia": ("Anatomía", "anatomia situacion forma porciones caras bordes configuracion externa"),
+    "anatomia": ("Anatomía", "anatomia situacion situado situada localizado localizada forma porciones caras bordes configuracion externa"),
     "relaciones": ("Relaciones", "relaciones relaciona anterior posterior lateral medial superior inferior limita"),
     "histologia": ("Histología", "histologia epitelio tejido celulas capas tunica mucosa estructura microscopica"),
     "embriologia": ("Embriología", "embriologia desarrollo origen deriva embrionario semana mesodermo endodermo ectodermo"),
@@ -35,6 +36,7 @@ ASPECTOS = {
 }
 
 TAM_FRAGMENTO = 1000
+FIGURAS_POR_PAGINA = 3
 
 
 def normalizar(texto: str) -> str:
@@ -110,6 +112,9 @@ class Biblioteca:
                 id INTEGER PRIMARY KEY, titulo TEXT UNIQUE, paginas INTEGER, etiqueta TEXT);
             CREATE TABLE IF NOT EXISTS fragmentos(
                 id INTEGER PRIMARY KEY, libro_id INTEGER, pagina INTEGER, texto TEXT);
+            CREATE TABLE IF NOT EXISTS figuras(
+                id INTEGER PRIMARY KEY, libro_id INTEGER, pagina INTEGER, datos BLOB);
+            CREATE INDEX IF NOT EXISTS figuras_pagina ON figuras(libro_id, pagina);
             """
         )
         self._reindexar()
@@ -117,18 +122,24 @@ class Biblioteca:
     # ---------- libros ----------
 
     def libros(self) -> list[tuple[int, str, int, int]]:
-        """(id, título, páginas, fragmentos) de cada libro."""
+        """(id, título, páginas, figuras) de cada libro."""
         with self._candado:
             return self._db.execute(
-                "SELECT l.id, l.titulo, l.paginas, COUNT(f.id) FROM libros l "
-                "LEFT JOIN fragmentos f ON f.libro_id = l.id GROUP BY l.id ORDER BY l.titulo"
+                "SELECT l.id, l.titulo, l.paginas, (SELECT COUNT(*) FROM figuras g WHERE g.libro_id = l.id) "
+                "FROM libros l ORDER BY l.titulo"
             ).fetchall()
 
     def tiene(self, titulo: str) -> bool:
         with self._candado:
             return self._db.execute("SELECT 1 FROM libros WHERE titulo = ?", (titulo,)).fetchone() is not None
 
-    def agregar(self, titulo: str, paginas: list[tuple[int, str]], etiqueta: str = "pág.") -> int:
+    def agregar(
+        self,
+        titulo: str,
+        paginas: list[tuple[int, str]],
+        etiqueta: str = "pág.",
+        figuras: list[tuple[int, bytes]] | None = None,
+    ) -> int:
         """Guarda un libro (reemplaza el que tenga el mismo título). Devuelve los fragmentos guardados."""
         filas = [(n, trozo) for n, texto in paginas for trozo in fragmentar(texto)]
         if not filas:
@@ -145,6 +156,10 @@ class Biblioteca:
                 "INSERT INTO fragmentos(libro_id, pagina, texto) VALUES (?, ?, ?)",
                 [(cur.lastrowid, n, t) for n, t in filas],
             )
+            self._db.executemany(
+                "INSERT INTO figuras(libro_id, pagina, datos) VALUES (?, ?, ?)",
+                [(cur.lastrowid, n, d) for n, d in figuras or []],
+            )
             self._db.commit()
             self._reindexar()
         return len(filas)
@@ -160,6 +175,7 @@ class Biblioteca:
             return fila[0]
 
     def _borrar_por_titulo(self, titulo: str) -> None:
+        self._db.execute("DELETE FROM figuras WHERE libro_id IN (SELECT id FROM libros WHERE titulo = ?)", (titulo,))
         self._db.execute("DELETE FROM fragmentos WHERE libro_id IN (SELECT id FROM libros WHERE titulo = ?)", (titulo,))
         self._db.execute("DELETE FROM libros WHERE titulo = ?", (titulo,))
 
@@ -212,9 +228,48 @@ class Biblioteca:
             return [Resultado(*self._filas[i], puntos=p) for p, i in buenos[:k]]
 
 
+    def resumen(self, consulta: str) -> list[tuple[str, Resultado]]:
+        """Para una estructura: el mejor fragmento de cada aspecto, como (aspecto, resultado)."""
+        secciones, usados = [], set()
+        for aspecto, (_, palabras) in ASPECTOS.items():
+            propias = set(terminos(palabras))
+            for r in self.buscar(consulta, 5, aspecto):
+                if r.texto not in usados and propias & set(terminos(r.texto)):
+                    usados.add(r.texto)
+                    secciones.append((aspecto, r))
+                    break
+        return secciones
+
+    def figuras(self, resultados: list[Resultado], maximo: int = 4) -> list[tuple[str, bytes]]:
+        """Las figuras de las páginas de esos resultados, como (fuente, imagen JPEG)."""
+        salida, vistas = [], set()
+        with self._candado:
+            for r in resultados:
+                if (r.titulo, r.pagina) in vistas:
+                    continue
+                vistas.add((r.titulo, r.pagina))
+                filas = self._db.execute(
+                    "SELECT g.datos FROM figuras g JOIN libros l ON l.id = g.libro_id "
+                    "WHERE l.titulo = ? AND g.pagina = ? ORDER BY g.id",
+                    (r.titulo, r.pagina),
+                ).fetchall()
+                for (datos,) in filas:
+                    salida.append((r.fuente, datos))
+                    if len(salida) >= maximo:
+                        return salida
+        return salida
+
+
+def es_estructura(consulta: str) -> bool:
+    """¿Es solo el nombre de una estructura («órgano de la visión») y no una pregunta concreta?"""
+    palabras = terminos(consulta)
+    de_aspecto = {t for _, lista in ASPECTOS.values() for t in terminos(lista)}
+    return "?" not in consulta and 0 < len(palabras) <= 4 and not de_aspecto & set(palabras)
+
+
 # ---------- lectura de archivos ----------
 
-Libro = tuple[str, str, list[tuple[int, str]]]  # (título, etiqueta, páginas)
+Libro = tuple[str, str, list[tuple[int, str]], list[tuple[int, bytes]]]  # (título, etiqueta, páginas, figuras)
 
 
 def _titulo(nombre: str) -> str:
@@ -232,11 +287,52 @@ def _decodificar(datos: bytes) -> str:
     return datos.decode("utf-8", errors="replace")
 
 
-def leer_pdf(datos: bytes) -> list[tuple[int, str]]:
+def _figuras_de(pagina) -> list[bytes]:
+    """Las imágenes de una página del PDF, en JPEG. Se saltan iconos, líneas y adornos."""
+    from PIL import Image
+
+    salida = []
+    try:
+        incrustadas = list(pagina.images)
+    except Exception:  # imagen en un formato que pypdf no entiende
+        return salida
+    for incrustada in incrustadas:
+        try:
+            imagen = incrustada.image
+            if imagen is None:
+                continue
+            ancho, alto = imagen.size
+            if ancho < 220 or alto < 160 or max(ancho, alto) > 6 * min(ancho, alto):
+                continue
+            if imagen.mode in ("RGBA", "LA", "P"):  # fondo transparente → blanco
+                imagen = imagen.convert("RGBA")
+                fondo = Image.new("RGB", imagen.size, "white")
+                fondo.paste(imagen, mask=imagen.split()[-1])
+                imagen = fondo
+            imagen = imagen.convert("RGB")
+            imagen.thumbnail((1280, 1280))
+            memoria = io.BytesIO()
+            imagen.save(memoria, "JPEG", quality=78)
+            salida.append(memoria.getvalue())
+        except Exception:
+            continue
+        if len(salida) >= FIGURAS_POR_PAGINA:
+            break
+    return salida
+
+
+def leer_pdf(datos: bytes) -> tuple[list[tuple[int, str]], list[tuple[int, bytes]]]:
+    """Texto y figuras de cada página."""
     from pypdf import PdfReader
 
     lector = PdfReader(io.BytesIO(datos))
-    return [(i, pagina.extract_text() or "") for i, pagina in enumerate(lector.pages, 1)]
+    paginas, figuras = [], []
+    for i, pagina in enumerate(lector.pages, 1):
+        paginas.append((i, pagina.extract_text() or ""))
+        figuras += [(i, d) for d in _figuras_de(pagina)]
+    # Una imagen repetida en muchas páginas es un logotipo o un adorno, no una figura.
+    veces = Counter(hashlib.md5(d).digest() for _, d in figuras)
+    return paginas, [(n, d) for n, d in figuras if veces[hashlib.md5(d).digest()] <= 3]
 
 
 def leer_txt(nombre: str, datos: bytes) -> Libro:
@@ -253,9 +349,9 @@ def leer_txt(nombre: str, datos: bytes) -> Libro:
         for m, siguiente in zip(marcas, marcas[1:] + [None]):
             fin = siguiente.start() if siguiente else len(texto)
             paginas.append((int(m.group(2)), texto[m.end() : fin]))
-        return titulo, etiqueta, paginas
+        return titulo, etiqueta, paginas, []
     trozos = fragmentar(texto, 3000)
-    return titulo, etiqueta, list(enumerate(trozos, 1))
+    return titulo, etiqueta, list(enumerate(trozos, 1)), []
 
 
 def leer_paquete(paquete: dict) -> list[Libro]:
@@ -264,7 +360,7 @@ def leer_paquete(paquete: dict) -> list[Libro]:
     for material in paquete.get("materiales", []):
         paginas = [(int(p.get("n", i)), str(p.get("texto", ""))) for i, p in enumerate(material.get("paginas", []), 1)]
         if paginas:
-            libros.append((str(material.get("nombre", "Material")), str(material.get("etiqueta", "pág.")), paginas))
+            libros.append((str(material.get("nombre", "Material")), str(material.get("etiqueta", "pág.")), paginas, []))
     return libros
 
 
@@ -272,7 +368,7 @@ def leer_archivo(nombre: str, datos: bytes) -> list[Libro]:
     """Convierte un archivo (PDF, .txt, paquete .json o .zip) en libros listos para guardar."""
     extension = nombre.lower().rsplit(".", 1)[-1] if "." in nombre else ""
     if extension == "pdf":
-        return [(_titulo(nombre), "pág.", leer_pdf(datos))]
+        return [(_titulo(nombre), "pág.", *leer_pdf(datos))]
     if extension == "txt":
         return [leer_txt(nombre, datos)]
     if extension == "json":

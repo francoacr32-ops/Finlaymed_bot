@@ -27,8 +27,9 @@ Te llegan una pregunta y fragmentos numerados de los libros de texto de la asign
 - Si los fragmentos no contienen la respuesta, dilo con la frase "No encontré eso en los libros" y, si algo de lo que traen se acerca, menciónalo. No completes con conocimiento propio.
 - Si traen solo una parte de lo que se pregunta, responde esa parte y di qué faltó.
 - Cuando se pregunta por una estructura sin precisar, organiza lo que haya en este orden: situación y anatomía, relaciones, irrigación e inervación, histología, embriología, fisiología. Omite los apartados de los que no haya nada.
+- Antes de tu respuesta el estudiante recibe, como fotos, las figuras que el libro trae en esas mismas páginas. No las ves, así que no describas su contenido; sí puedes remitir a "la figura de la pág. N" cuando el fragmento la mencione.
 - Usa la terminología de los libros. Escribe en español, en texto plano: Telegram no muestra Markdown, así que no uses asteriscos, almohadillas ni tablas; separa los apartados con una línea en blanco y un título corto en mayúsculas.
-- Sé breve: lo que un estudiante necesita para repasar, normalmente menos de 300 palabras."""
+- Sé breve: lo que un estudiante necesita para repasar, normalmente menos de 300 palabras, o hasta 500 cuando se pide una estructura completa con todos sus apartados."""
 
 
 def disponible() -> bool:

@@ -5,7 +5,10 @@ Morfofisiología I, II y III: le escribes una estructura o una pregunta y respon
 con lo que dicen los libros, citando **libro y página**. Si no está en los libros
 responde *"No encontré eso en los libros"*.
 
-- Pregunta libre: `riñón`, `¿cuáles son las relaciones del estómago?`
+- **Estructura completa con fotos**: escribes solo la estructura (`órgano de la visión`)
+  y envía las figuras que el libro trae en esas páginas y, debajo, el texto por
+  apartados: anatomía, relaciones, histología, embriología, fisiología e irrigación.
+- Pregunta concreta: `¿cuáles son las relaciones del estómago?`
 - Por aspecto: `/anatomia`, `/relaciones`, `/histologia`, `/embriologia`,
   `/fisiologia`, `/irrigacion` seguidos de la estructura (o los botones que salen
   debajo de cada respuesta).
@@ -71,6 +74,10 @@ Los libros **no se suben a GitHub**. Hay tres formas:
    envía al bot ese `.txt` (pesa muy poco y conserva las páginas).
 3. **En el servidor**: copia los archivos a la carpeta `libros/` o pon sus enlaces
    en `LIBROS_URLS`.
+
+**Las fotos salen solo de los PDF**: al cargar un PDF el bot guarda las figuras de
+cada página (descarta iconos y adornos) y las envía junto a la respuesta que cita
+esa página. Un `.txt` exportado trae el texto pero no las figuras.
 
 El título del libro sale del nombre del archivo: nómbralos
 `Morfofisiología I.pdf`, `Morfofisiología II.pdf`, `Morfofisiología III.pdf`.
