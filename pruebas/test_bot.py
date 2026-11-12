@@ -316,6 +316,10 @@ class Chat(unittest.TestCase):
         self.assertTrue(all(len(t) <= 4096 for t, _ in self.enviados))
         self.assertEqual([t for _, t in self.enviados if t], ["teclado"])
 
+    def test_token_pegado_con_texto_alrededor(self):
+        self.assertEqual(bot.leer_token("API:\n1234567890:AAF-abc_DEF0123456789abcdefghijklmno \n"), "1234567890:AAF-abc_DEF0123456789abcdefghijklmno")
+        self.assertIsNone(bot.leer_token("API:"))
+
     def test_los_manejadores_se_registran(self):
         self.assertGreaterEqual(len(bot.crear_aplicacion("123:ABC").handlers[0]), 12)
 

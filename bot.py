@@ -17,6 +17,7 @@ import datetime
 import json
 import logging
 import os
+import re
 import threading
 import urllib.parse
 import urllib.request
@@ -379,6 +380,12 @@ def abrir_puerto(puerto: int) -> None:
     threading.Thread(target=HTTPServer(("0.0.0.0", puerto), Pagina).serve_forever, daemon=True).start()
 
 
+def leer_token(valor: str) -> str | None:
+    """Saca el token aunque se haya pegado con espacios, saltos de línea o texto alrededor."""
+    encontrado = re.search(r"\d{6,}:[A-Za-z0-9_-]{30,}", valor)
+    return encontrado.group(0) if encontrado else None
+
+
 def crear_aplicacion(token: str) -> Application:
     aplicacion = Application.builder().token(token).post_init(al_arrancar).build()
     aplicacion.add_handler(CommandHandler(["start", "ayuda", "help"], cmd_start))
@@ -395,9 +402,9 @@ def crear_aplicacion(token: str) -> Application:
 
 
 def main() -> None:
-    token = os.environ.get("TELEGRAM_TOKEN")
+    token = leer_token(os.environ.get("TELEGRAM_TOKEN", ""))
     if not token:
-        raise SystemExit("Falta la variable TELEGRAM_TOKEN (el token que da @BotFather).")
+        raise SystemExit("Falta la variable TELEGRAM_TOKEN, o no contiene un token de @BotFather (123456:ABC...).")
     if os.environ.get("PORT", "").isdigit():
         abrir_puerto(int(os.environ["PORT"]))
     cargar_al_arrancar()
