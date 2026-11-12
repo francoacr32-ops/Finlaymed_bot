@@ -18,16 +18,51 @@ os.environ.pop("ANTHROPIC_API_KEY", None)
 import biblioteca as bib  # noqa: E402
 import bot  # noqa: E402
 
-RINON = (
-    "El riñón es un órgano par situado en el espacio retroperitoneal, a ambos lados de la columna vertebral. "
-    "Tiene dos caras, dos bordes y dos polos."
-)
-RELACIONES = (
-    "Relaciones del riñón derecho: su cara anterior se relaciona con el hígado, la flexura cólica derecha "
-    "y la porción descendente del duodeno. La cara posterior descansa sobre el diafragma y el músculo psoas mayor."
-)
-EMBRIO = "El riñón definitivo o metanefros deriva del mesodermo intermedio y aparece en la quinta semana del desarrollo."
-CORAZON = "El corazón es un órgano muscular hueco situado en el mediastino medio. Las arterias coronarias irrigan el miocardio."
+# Un libro de prueba con la forma de los reales: renglones cortados, guiones, pies de figura,
+# número de página suelto, un prólogo y una estructura (el corazón) tratada en páginas seguidas.
+PROLOGO = """7
+Prólogo
+Este libro ofrece una visión de la anatomía, la histología y la fisiología de cada órgano
+y sistema, como el corazón, para los estudiantes de Medicina."""
+CORAZON_1 = """120
+CORAZÓN
+El corazón es un órgano muscular hueco situado en el mediastino medio. Tiene for-
+ma de cono, con una base, un vértice y tres caras. El corazón pesa unos 300 gramos.
+Fig. 5.1. Vista anterior del corazón y los grandes
+vasos.
+Relaciones del corazón
+Por delante el corazón se relaciona con el esternón y los cartílagos costales. Por detrás
+limita con el esófago y la aorta descendente."""
+CORAZON_2 = """121
+Estructura histológica
+La pared del corazón tiene tres capas: el endocardio, formado por un epitelio simple plano;
+el miocardio, de tejido muscular estriado cardíaco, y el epicardio.
+Fig. 5.2. Corte histológico del miocardio.
+Desarrollo del corazón
+El corazón deriva del mesodermo esplácnico. En la tercera semana aparece el tubo cardíaco
+primitivo, que luego se pliega."""
+CORAZON_3 = """122
+Irrigación del corazón
+El corazón está irrigado por las arterias coronarias derecha e izquierda. El drenaje venoso
+llega al seno coronario.
+Funciones del corazón
+La función del corazón es bombear la sangre. Su mecanismo de regulación depende del
+sistema nervioso autónomo."""
+ARTERIAS = """160
+Arterias de la cabeza
+La arteria carótida externa nace lejos del corazón e irriga la cara. Sus ramos se relacionan
+con el nervio hipogloso y son anteriores, posteriores y mediales."""
+GENERAL = """40
+Hojas germinativas
+El embrión trilaminar da origen a todos los órganos: del mesodermo derivan el corazón, los
+vasos y la sangre. El desarrollo embrionario sigue en la cuarta semana."""
+RINON = "El riñón es un órgano par situado en el espacio retroperitoneal. Tiene dos caras, dos bordes y dos polos."
+
+
+def biblioteca_de_prueba(b):
+    b.agregar("Tomo III", [(7, PROLOGO), (120, CORAZON_1), (121, CORAZON_2), (122, CORAZON_3), (160, ARTERIAS)],
+              figuras=[(120, b"fig-120"), (121, b"fig-121"), (160, b"fig-160")])
+    b.agregar("Tomo I", [(40, GENERAL), (41, RINON)])
 
 
 def jpeg(ancho: int, alto: int) -> bytes:
@@ -81,58 +116,92 @@ class Texto(unittest.TestCase):
         self.assertEqual(" ".join(trozos), texto)
         self.assertEqual("".join(bib.fragmentar("x" * 2500)), "x" * 2500)
 
+    def test_la_pagina_se_limpia(self):
+        bloques, pies, ultimo = bib.partir_pagina(CORAZON_1)
+        self.assertEqual([e for e, _ in bloques], ["CORAZÓN", "Relaciones del corazón"])
+        cuerpo = bloques[0][1]
+        self.assertTrue(cuerpo.startswith("El corazón es un órgano"))  # sin el «120» suelto
+        self.assertIn("Tiene forma de cono", cuerpo)  # «for-/ma» reparado y renglones unidos
+        self.assertNotIn("Fig.", cuerpo)
+        self.assertEqual(pies, ["Fig. 5.1. Vista anterior del corazón y los grandes vasos."])
+        self.assertEqual(ultimo, "Relaciones del corazón")
+
 
 class Busqueda(unittest.TestCase):
     def setUp(self):
         self.b = bib.Biblioteca(":memory:")
-        self.b.agregar("Morfofisiología III", [(10, RINON), (11, RELACIONES), (12, EMBRIO)])
-        self.b.agregar("Morfofisiología II", [(40, CORAZON)])
+        biblioteca_de_prueba(self.b)
 
-    def test_cita_libro_y_pagina(self):
-        r = self.b.buscar("corazon")[0]
-        self.assertEqual(r.fuente, "Morfofisiología II, pág. 40")
+    def test_el_tema_es_un_solo_lugar_del_libro(self):
+        tema = self.b.tema("corazón")
+        self.assertEqual((tema.titulo, tema.paginas), ("Tomo III", [120, 121, 122]))
+        self.assertEqual(tema.fuente, "Tomo III, pág. 120–122")
 
-    def test_el_aspecto_sube_el_fragmento_correcto(self):
-        self.assertEqual(self.b.buscar("riñón", aspecto="relaciones")[0].pagina, 11)
-        self.assertEqual(self.b.buscar("riñón", aspecto="embriologia")[0].pagina, 12)
+    def test_resumen_ordenado_y_de_un_solo_libro(self):
+        tema, entrada, secciones = self.b.resumen("corazón")
+        self.assertTrue(entrada.texto.startswith("El corazón es un órgano muscular hueco"))
+        donde = {a: r for a, r in secciones}
+        self.assertTrue(donde["relaciones"].texto.startswith("Por delante el corazón se relaciona"))
+        self.assertIn("endocardio", donde["histologia"].texto)
+        self.assertIn("deriva del mesodermo esplácnico", donde["embriologia"].texto)
+        self.assertIn("arterias coronarias", donde["irrigacion"].texto)
+        self.assertIn("bombear la sangre", donde["fisiologia"].texto)
+        # Ni el prólogo, ni la carótida, ni el otro tomo.
+        self.assertEqual({r.titulo for _, r in secciones}, {"Tomo III"})
+        self.assertTrue(all(120 <= r.pagina <= 122 for _, r in secciones))
 
-    def test_pregunta_completa(self):
-        self.assertEqual(self.b.buscar("¿De dónde deriva el riñón definitivo?")[0].pagina, 12)
+    def test_aspecto_dentro_del_tema(self):
+        tema, parrafos = self.b.aspecto("corazón", "embriologia")
+        self.assertEqual(parrafos[0].pagina, 121)
+        self.assertIsNone(self.b.aspecto("riñón", "embriologia"))
 
     def test_lo_que_no_esta_no_aparece(self):
+        # «órgano» está en todas partes; «visión» solo en el prólogo; el ojo no está en estos libros.
+        self.assertIsNone(self.b.resumen("páncreas"))
+        self.assertIsNone(self.b.resumen("órgano del olfato"))
         self.assertEqual(self.b.buscar("páncreas"), [])
+        self.assertEqual(self.b.buscar("órgano del olfato"), [])
         self.assertEqual(self.b.buscar("el de la"), [])
 
-    def test_reemplazar_y_borrar(self):
-        self.b.agregar("Morfofisiología II", [(1, "El páncreas es una glándula mixta.")])
-        self.assertEqual(self.b.buscar("corazón"), [])
-        self.assertEqual(len(self.b.libros()), 2)
-        numero = [i for i, titulo, *_ in self.b.libros() if titulo == "Morfofisiología II"][0]
-        self.assertEqual(self.b.borrar(numero), "Morfofisiología II")
-        self.assertEqual(self.b.buscar("páncreas"), [])
-
-    def test_resumen_de_una_estructura_trae_cada_aspecto(self):
-        secciones = dict(self.b.resumen("riñón"))
-        self.assertEqual(secciones["relaciones"].pagina, 11)
-        self.assertEqual(secciones["embriologia"].pagina, 12)
-        self.assertEqual(secciones["anatomia"].pagina, 10)
-        self.assertNotIn("histologia", secciones)  # el libro de prueba no trae histología del riñón
+    def test_pregunta_concreta(self):
+        r = self.b.buscar("¿Con qué se relaciona el corazón por detrás?")[0]
+        self.assertEqual(r.fuente, "Tomo III, pág. 120")
+        self.assertEqual(self.b.buscar("riñón polos")[0].fuente, "Tomo I, pág. 41")
 
     def test_distingue_estructura_de_pregunta(self):
         self.assertTrue(bib.es_estructura("órgano de la visión"))
+        self.assertTrue(bib.es_estructura("arteria tibial anterior"))
         self.assertFalse(bib.es_estructura("¿Dónde está el riñón?"))
-        self.assertFalse(bib.es_estructura("origen embriológico del corazón"))
+        self.assertFalse(bib.es_estructura("desarrollo del corazón"))
 
-    def test_figuras_de_la_pagina(self):
-        self.b.agregar("Atlas", [(5, RINON)], figuras=[(5, b"uno"), (5, b"dos"), (9, b"otra")])
-        figuras = self.b.figuras(self.b.buscar("riñón polos"))
-        self.assertEqual(figuras, [("Atlas, pág. 5", b"uno"), ("Atlas, pág. 5", b"dos")])
-        self.b.borrar([i for i, titulo, *_ in self.b.libros() if titulo == "Atlas"][0])
-        self.assertEqual(self.b._db.execute("SELECT COUNT(*) FROM figuras").fetchone()[0], 0)
+    def test_figuras_con_su_pie_y_primero_las_que_nombran_la_estructura(self):
+        figuras = self.b.figuras([("Tomo III", 160), ("Tomo III", 121), ("Tomo III", 120), ("Tomo III", 122)], "corazón")
+        self.assertEqual(figuras[0], ("📖 Tomo III, pág. 120\nFig. 5.1. Vista anterior del corazón y los grandes vasos.", b"fig-120"))
+        self.assertEqual([d for _, d in figuras], [b"fig-120", b"fig-160", b"fig-121"])
+
+    def test_reemplazar_y_borrar(self):
+        self.b.agregar("Tomo I", [(1, "El páncreas es una glándula mixta.")])
+        self.assertEqual(self.b.buscar("riñón"), [])
+        numero = [i for i, titulo, *_ in self.b.libros() if titulo == "Tomo III"][0]
+        self.assertEqual(self.b.borrar(numero), "Tomo III")
+        self.assertIsNone(self.b.tema("corazón"))
+        for tabla in ("figuras", "pies", "crudo"):
+            self.assertEqual(self.b._db.execute(f"SELECT COUNT(*) FROM {tabla} WHERE libro_id = ?", (numero,)).fetchone()[0], 0)
 
     def test_libro_sin_texto_se_rechaza(self):
         with self.assertRaises(ValueError):
             self.b.agregar("Escaneado", [(1, ""), (2, "   ")])
+
+    def test_copia_procesada_ida_y_vuelta(self):
+        partes = self.b.exportar("Tomo III", tam_parte=10)  # tan pequeño que cada figura va en su parte
+        self.assertEqual(len(partes), 4)  # la ficha con el texto y tres figuras
+        otra = bib.Biblioteca(":memory:")
+        self.assertEqual(otra.importar(partes), "Tomo III")
+        self.assertEqual(otra.libros()[0][1:], ("Tomo III", 5, 3))
+        self.assertEqual(otra.tema("corazón").paginas, [120, 121, 122])
+        self.assertEqual(otra.figuras([("Tomo III", 121)])[0][1], b"fig-121")
+        with self.assertRaises(ValueError):
+            otra.importar(partes[1:])
 
 
 class Archivos(unittest.TestCase):
@@ -171,14 +240,54 @@ class Archivos(unittest.TestCase):
             bib.leer_archivo("foto.jpg", b"...")
 
 
+def exportado(*paginas):
+    """Un .txt como el de «Exportar texto» de Finlay."""
+    return "".join(f"=== pág. {p.split()[0]} ===\n{p}\n" for p in paginas).encode()
+
+
 class Chat(unittest.TestCase):
     """El bot atendiendo mensajes, con un Telegram de mentira."""
 
     def setUp(self):
         for numero, *_ in bot.biblioteca.libros():
             bot.biblioteca.borrar(numero)
-        self.enviados = []
-        self.fotos = []
+        self.enviados, self.fotos, self.bajados = [], [], []
+        self.nube = {}  # archivos que «guarda Telegram», por su file_id
+        self.chat = SimpleNamespace(pinned_message=None, ultimo=None)
+
+    def bot_falso(self):
+        async def send_message(admin, texto, **_):
+            self.chat.ultimo = SimpleNamespace(message_id=1, text=texto)
+            return self.chat.ultimo
+
+        async def pin_chat_message(admin, message_id, **_):
+            self.chat.pinned_message = self.chat.ultimo
+
+        async def unpin_all_chat_messages(admin):
+            self.chat.pinned_message = None
+
+        async def get_chat(admin):
+            return self.chat
+
+        async def get_file(file_id):
+            async def download_as_bytearray():
+                self.bajados.append(file_id)
+                return bytearray(self.nube[file_id])
+
+            return SimpleNamespace(download_as_bytearray=download_as_bytearray)
+
+        async def send_document(chat, documento, **_):
+            file_id = f"copia-{len(self.nube)}"
+            self.nube[file_id] = documento.input_file_content
+            return SimpleNamespace(document=SimpleNamespace(file_id=file_id))
+
+        return SimpleNamespace(
+            send_message=send_message, pin_chat_message=pin_chat_message, get_chat=get_chat, get_file=get_file,
+            unpin_all_chat_messages=unpin_all_chat_messages, send_document=send_document,
+        )
+
+    def contexto(self, *args):
+        return SimpleNamespace(user_data={}, args=list(args), bot=self.bot_falso())
 
     def update(self, usuario=1, texto=None, documento=None):
         async def send_message(texto, reply_markup=None):
@@ -196,125 +305,103 @@ class Chat(unittest.TestCase):
         return SimpleNamespace(
             effective_user=SimpleNamespace(id=usuario),
             effective_chat=SimpleNamespace(
-                send_message=send_message, send_action=send_action, send_photo=send_photo, send_media_group=send_media_group
+                id=usuario, send_message=send_message, send_action=send_action, send_photo=send_photo, send_media_group=send_media_group
             ),
             message=SimpleNamespace(text=texto, document=documento),
         )
 
-    def bot_falso(self, archivos):
-        """Un Telegram de mentira que recuerda el mensaje anclado y devuelve archivos por su id."""
-        chat = SimpleNamespace(pinned_message=None, ultimo=None)
-
-        async def send_message(admin, texto, disable_notification=False):
-            chat.ultimo = SimpleNamespace(message_id=1, text=texto)
-            return chat.ultimo
-
-        async def pin_chat_message(admin, message_id, disable_notification=False):
-            chat.pinned_message = chat.ultimo
-
-        async def unpin_all_chat_messages(admin):
-            chat.pinned_message = None
-
-        async def get_chat(admin):
-            return chat
-
-        async def get_file(file_id):
-            async def download_as_bytearray():
-                return bytearray(archivos[file_id])
-
-            return SimpleNamespace(download_as_bytearray=download_as_bytearray)
-
-        return SimpleNamespace(
-            send_message=send_message, pin_chat_message=pin_chat_message,
-            unpin_all_chat_messages=unpin_all_chat_messages, get_chat=get_chat, get_file=get_file,
-        )
-
-    def test_respaldo_y_restauracion_tras_perder_el_disco(self):
-        txt = f"=== pág. 10 ===\n{RINON}\n".encode()
-        falso = self.bot_falso({"id-1": txt})
-        contexto = SimpleNamespace(user_data={}, args=[], bot=falso)
-        documento = self.documento("Morfo III.txt", txt)
-        documento.file_id = "id-1"
-        asyncio.run(bot.al_recibir_archivo(self.update(usuario=7, documento=documento), contexto))
-        anclado = asyncio.run(falso.get_chat(7)).pinned_message.text
-        self.assertTrue(anclado.startswith(bot.MARCA))
-        self.assertIn("id-1", anclado)
-
-        # El servidor reinicia y pierde el disco: la biblioteca queda vacía.
-        bot.biblioteca.borrar(bot.biblioteca.libros()[0][0])
-        self.assertEqual(bot.biblioteca.archivos(), [])
-        asyncio.run(bot.restaurar(falso))
-        self.assertEqual([titulo for _, titulo, *_ in bot.biblioteca.libros()], ["Morfo III"])
-        self.assertEqual(bot.biblioteca.archivos(), [["id-1", "Morfo III.txt"]])
-        self.assertFalse(bot.estado["restaurando"])
-
-        # Al borrar el libro, el respaldo se actualiza y ya no lo trae.
-        contexto.args = [str(bot.biblioteca.libros()[0][0])]
-        asyncio.run(bot.cmd_borrar(self.update(usuario=7), contexto))
-        self.assertNotIn("id-1", asyncio.run(falso.get_chat(7)).pinned_message.text)
-
     def documento(self, nombre, datos, tam=None):
-        async def download_as_bytearray():
-            return bytearray(datos)
+        self.nube[f"id-{nombre}"] = datos
 
         async def get_file():
-            return SimpleNamespace(download_as_bytearray=download_as_bytearray)
+            return await self.bot_falso().get_file(f"id-{nombre}")
 
         return SimpleNamespace(file_name=nombre, file_size=tam or len(datos), get_file=get_file, file_id=f"id-{nombre}")
 
-    def test_flujo_completo(self):
-        contexto = SimpleNamespace(user_data={}, args=[], bot=self.bot_falso({}))
-        txt = f"=== pág. 10 ===\n{RINON}\n=== pág. 11 ===\n{RELACIONES}\n".encode()
+    def enviar_libro(self, nombre, datos, usuario=7, contexto=None):
+        asyncio.run(bot.al_recibir_archivo(self.update(usuario=usuario, documento=self.documento(nombre, datos)), contexto or self.contexto()))
 
+    def test_permisos_y_avisos(self):
+        contexto = self.contexto()
         asyncio.run(bot.al_escribir(self.update(texto="riñón"), contexto))
         self.assertIn("no tengo libros", self.enviados[-1][0])
-
-        asyncio.run(bot.al_recibir_archivo(self.update(usuario=1, documento=self.documento("Morfo III.txt", txt)), contexto))
+        self.enviar_libro("Tomo I.txt", exportado(GENERAL), usuario=1)
         self.assertIn("Solo el administrador", self.enviados[-1][0])
         self.assertEqual(bot.biblioteca.libros(), [])
-
-        asyncio.run(bot.al_recibir_archivo(self.update(usuario=7, documento=self.documento("Morfo III.txt", txt)), contexto))
-        self.assertIn("✅ Morfo III: 2 páginas, 0 figuras", self.enviados[-1][0])
-
-        asyncio.run(bot.al_recibir_archivo(self.update(usuario=7, documento=self.documento("g.pdf", b"", 30_000_000)), contexto))
+        grande = self.documento("g.pdf", b"", 30_000_000)
+        asyncio.run(bot.al_recibir_archivo(self.update(usuario=7, documento=grande), contexto))
         self.assertIn("20 MB", self.enviados[-1][0])
 
-        asyncio.run(bot.al_escribir(self.update(texto="¿Dónde está el riñón?"), contexto))
+    def test_estructura_ordenada_con_sus_fotos(self):
+        biblioteca_de_prueba(bot.biblioteca)
+        contexto = self.contexto()
+        asyncio.run(bot.al_escribir(self.update(texto="corazón"), contexto))
         texto, teclado = self.enviados[-1]
-        self.assertIn("📖 Morfo III, pág. 10", texto)
+        self.assertTrue(texto.startswith("🔎 CORAZÓN\n📖 Tomo III, pág. 120–122\n\nEl corazón es un órgano muscular hueco"))
+        orden = [texto.index(t) for t in ("RELACIONES · pág. 120", "HISTOLOGÍA · pág. 121", "EMBRIOLOGÍA · pág. 121", "FISIOLOGÍA · pág. 122")]
+        self.assertEqual(orden, sorted(orden))
+        for ajeno in ("Prólogo", "carótida", "Tomo I,", "trilaminar"):
+            self.assertNotIn(ajeno, texto)
         self.assertEqual(len([b for fila in teclado.inline_keyboard for b in fila]), 6)
+        self.assertEqual(len(self.fotos), 2)
+        self.assertTrue(self.fotos[0].startswith("📖 Tomo III, pág. 120\nFig. 5.1. Vista anterior del corazón"))
 
-        contexto.args = ["riñón"]
-        asyncio.run(bot.cmd_aspecto("relaciones")(self.update(), contexto))
-        self.assertTrue(self.enviados[-1][0].startswith("📖 Morfo III, pág. 11"))
-
-        asyncio.run(bot.al_escribir(self.update(texto="páncreas"), contexto))
-        self.assertEqual(self.enviados[-1][0], bot.NO_ENCONTRE)
-
-    def test_estructura_con_fotos_y_apartados(self):
-        contexto = SimpleNamespace(user_data={}, args=[], bot=self.bot_falso({}))
-        pdf = pdf_minimo("El ojo u organo de la vision esta situado en la orbita", figuras=((640, 480), (500, 400)))
-        asyncio.run(bot.al_recibir_archivo(self.update(usuario=7, documento=self.documento("Morfo II.pdf", pdf)), contexto))
-        self.assertIn("✅ Morfo II: 1 páginas, 2 figuras", self.enviados[-1][0])
-        bot.biblioteca.agregar("Morfo I", [(30, "El ojo deriva del ectodermo en la cuarta semana del desarrollo."),
-                                           (31, "La retina del ojo tiene diez capas de celulas.")])
+        asyncio.run(bot.cmd_aspecto("relaciones")(self.update(), self.contexto("corazón")))
+        self.assertTrue(self.enviados[-1][0].startswith("RELACIONES · corazón\n📖 Tomo III, pág. 120–122\n\npág. 120\nPor delante"))
 
         asyncio.run(bot.al_escribir(self.update(texto="órgano de la visión"), contexto))
-        self.assertEqual(self.fotos, ["📖 Morfo II, pág. 1", "📖 Morfo II, pág. 1"])
-        self.assertTrue(self.enviados[-1][0].startswith("ANATOMÍA\n📖 Morfo II, pág. 1"))
+        self.assertEqual(self.enviados[-1][0], bot.NO_ENCONTRE)
 
-        self.fotos.clear()
-        asyncio.run(bot.al_escribir(self.update(texto="ojo"), contexto))
-        texto = self.enviados[-1][0]
-        for titulo in ("ANATOMÍA", "HISTOLOGÍA\n📖 Morfo I, pág. 31", "EMBRIOLOGÍA\n📖 Morfo I, pág. 30"):
-            self.assertIn(titulo, texto)
-        self.assertEqual(len(self.fotos), 2)
+    def test_respaldo_con_copia_rapida(self):
+        self.enviar_libro("Tomo III.txt", exportado(CORAZON_1, CORAZON_2))
+        self.assertIn("✅ Tomo III: 2 páginas, 0 figuras", self.enviados[-2][0] + self.enviados[-1][0])
+        anclado = json.loads(self.chat.pinned_message.text[len(bot.MARCA):])
+        self.assertEqual(anclado["archivos"], [["id-Tomo III.txt", "Tomo III.txt", ["Tomo III"]]])
+        self.assertEqual(list(anclado["copias"]), ["Tomo III"])
+
+        # El servidor reinicia y pierde el disco. Al arrancar se recupera de la copia, sin releer el original.
+        respaldo = self.chat.pinned_message
+        bot.biblioteca.borrar(bot.biblioteca.libros()[0][0])
+        self.assertEqual((bot.biblioteca.archivos(), bot.biblioteca.copias()), ([], {}))
+        self.bajados.clear()
+        asyncio.run(bot.restaurar(self.bot_falso()))
+        self.assertEqual(self.bajados, anclado["copias"]["Tomo III"])
+        self.assertEqual(bot.biblioteca.tema("corazón").paginas, [120, 121])
+        self.assertEqual(bot.biblioteca.archivos(), anclado["archivos"])
+        self.assertIs(self.chat.pinned_message, respaldo)  # nada cambió: no se vuelve a anclar
+        self.assertFalse(bot.estado["restaurando"])
+
+        # Al borrar el libro, el respaldo se actualiza y ya no lo trae.
+        asyncio.run(bot.cmd_borrar(self.update(usuario=7), self.contexto(str(bot.biblioteca.libros()[0][0]))))
+        self.assertEqual(json.loads(self.chat.pinned_message.text[len(bot.MARCA):]), {"archivos": [], "copias": {}})
+
+    def test_respaldo_antiguo_se_lee_y_se_le_hace_copia(self):
+        self.nube["viejo"] = exportado(CORAZON_1)
+        self.chat.pinned_message = SimpleNamespace(text=bot.MARCA + json.dumps([["viejo", "Tomo III.txt"]]))
+        asyncio.run(bot.restaurar(self.bot_falso()))
+        self.assertEqual([t for _, t, *_ in bot.biblioteca.libros()], ["Tomo III"])
+        anclado = json.loads(self.chat.pinned_message.text[len(bot.MARCA):])
+        self.assertEqual(anclado["archivos"], [["viejo", "Tomo III.txt", ["Tomo III"]]])
+        self.assertEqual(len(anclado["copias"]["Tomo III"]), 1)
+
+    def test_pdf_con_figuras_de_punta_a_punta(self):
+        pdf = pdf_minimo("El ojo u organo de la vision esta situado en la orbita", figuras=((640, 480), (500, 400)))
+        self.enviar_libro("Morfo II.pdf", pdf)
+        self.assertIn("✅ Morfo II: 1 páginas, 2 figuras", " ".join(t for t, _ in self.enviados))
+        asyncio.run(bot.al_escribir(self.update(texto="órgano de la visión"), self.contexto()))
+        self.assertEqual(self.fotos, ["📖 Morfo II, pág. 1", "📖 Morfo II, pág. 1"])
+        self.assertTrue(self.enviados[-1][0].startswith("🔎 ÓRGANO DE LA VISIÓN\n📖 Morfo II, pág. 1\n\nEl ojo u organo"))
 
     def test_mensaje_largo_se_parte(self):
         asyncio.run(bot.enviar(self.update(), "línea de texto\n" * 700, "teclado"))
         self.assertGreater(len(self.enviados), 1)
         self.assertTrue(all(len(t) <= 4096 for t, _ in self.enviados))
         self.assertEqual([t for _, t in self.enviados if t], ["teclado"])
+
+    def test_recortar_termina_en_un_punto(self):
+        texto = "Primera oración completa. " * 60
+        self.assertTrue(bot.recortar(texto).endswith("completa."))
+        self.assertLessEqual(len(bot.recortar(texto)), 900)
 
     def test_token_pegado_con_texto_alrededor(self):
         self.assertEqual(bot.leer_token("API:\n1234567890:AAF-abc_DEF0123456789abcdefghijklmno \n"), "1234567890:AAF-abc_DEF0123456789abcdefghijklmno")

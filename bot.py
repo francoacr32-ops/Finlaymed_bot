@@ -24,7 +24,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto, Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, InputFile, InputMediaPhoto, Update
 from telegram.constants import ChatAction
 from telegram.error import TelegramError
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
@@ -44,7 +44,7 @@ MAX_TELEGRAM = 20 * 1024 * 1024  # un bot solo puede descargar archivos de hasta
 NO_ENCONTRE = "No encontré eso en los libros. Prueba con otras palabras o con el nombre exacto de la estructura."
 
 DATA_DIR.mkdir(parents=True, exist_ok=True)
-biblioteca = Biblioteca(str(DATA_DIR / "biblioteca.db"))
+biblioteca = Biblioteca(str(DATA_DIR / "biblioteca2.db"))
 tutor = ia.Tutor() if ia.disponible() else None
 _usos: dict[tuple[int, datetime.date], int] = {}
 
@@ -61,7 +61,7 @@ Escríbeme el nombre de una estructura o una pregunta. Por ejemplo:
 • ¿Cuáles son las relaciones del estómago?
 • origen embriológico del corazón
 
-Si escribes solo la estructura (por ejemplo: órgano de la visión) te envío las figuras del libro y, debajo, su anatomía, relaciones, histología, embriología y fisiología.
+Si escribes solo la estructura (por ejemplo: corazón) voy a la parte del libro donde se trata y te envío sus figuras y, debajo, su anatomía, relaciones, histología, embriología y fisiología.
 
 Debajo de cada respuesta hay botones para pedir un aspecto concreto de lo mismo. También puedes escribirlo directamente:
 /anatomia hígado
@@ -93,29 +93,52 @@ def botones() -> InlineKeyboardMarkup:
     )
 
 
-def _cita(r: Resultado) -> str:
-    texto = r.texto if len(r.texto) <= 900 else r.texto[:900].rsplit(" ", 1)[0] + "…"
-    return f"📖 {r.fuente}\n{texto}"
+def recortar(texto: str, maximo: int = 900) -> str:
+    """Acorta un párrafo largo terminándolo en un punto, no a mitad de una frase."""
+    if len(texto) <= maximo:
+        return texto
+    corto = texto[:maximo]
+    punto = corto.rfind(". ")
+    return corto[: punto + 1] if punto > maximo // 2 else corto.rsplit(" ", 1)[0] + "…"
 
 
-def con_fragmentos(resultados: list[Resultado]) -> str:
-    """Respuesta sin IA: los mejores fragmentos tal como están en el libro."""
-    return "\n\n".join(_cita(r) for r in resultados[:3])
+def _parrafo(r: Resultado) -> str:
+    return f"{r.etiqueta} {r.pagina}\n{recortar(r.texto)}"
 
 
-def con_secciones(secciones: list[tuple[str, Resultado]]) -> str:
-    """Respuesta sin IA para una estructura: un apartado por aspecto."""
-    return "\n\n".join(f"{ASPECTOS[a][0].upper()}\n{_cita(r)}" for a, r in secciones)
+def preparar(pregunta: str, aspecto: str | None) -> tuple[str, list[Resultado], list[tuple[str, int]]] | None:
+    """Arma la respuesta sin IA. Devuelve (texto, párrafos usados, páginas donde buscar figuras)."""
+    if aspecto in ASPECTOS:
+        hallado = biblioteca.aspecto(pregunta, aspecto)
+        if hallado:
+            tema, parrafos = hallado
+            texto = f"{ASPECTOS[aspecto][0].upper()} · {pregunta}\n📖 {tema.fuente}\n\n" + "\n\n".join(map(_parrafo, parrafos))
+            return texto, parrafos, [(r.titulo, r.pagina) for r in parrafos]
+    elif es_estructura(pregunta):
+        hallado = biblioteca.resumen(pregunta)
+        if hallado:
+            # Todo sale de un solo lugar: la parte del libro donde se trata la estructura.
+            tema, entrada, secciones = hallado
+            partes = [f"🔎 {pregunta.upper()}\n📖 {tema.fuente}", recortar(entrada.texto)]
+            partes += [f"{ASPECTOS[a][0].upper()} · {_parrafo(r)}" for a, r in secciones]
+            usados = [entrada] + [r for _, r in secciones]
+            paginas = [(r.titulo, r.pagina) for r in usados] + [(tema.titulo, p) for p in tema.paginas]
+            return "\n\n".join(partes), usados, paginas
+        return None
+    resultados = biblioteca.buscar(pregunta, 6, aspecto)
+    if not resultados:
+        return None
+    texto = "\n\n".join(f"📖 {r.fuente}\n{recortar(r.texto)}" for r in resultados[:3])
+    return texto, resultados, [(r.titulo, r.pagina) for r in resultados[:3]]
 
 
 async def enviar_figuras(update: Update, figuras: list[tuple[str, bytes]]) -> None:
+    """Envía las figuras con su pie: (pie, imagen)."""
     try:
         if len(figuras) == 1:
-            await update.effective_chat.send_photo(figuras[0][1], caption=f"📖 {figuras[0][0]}")
+            await update.effective_chat.send_photo(figuras[0][1], caption=figuras[0][0])
         elif figuras:
-            await update.effective_chat.send_media_group(
-                [InputMediaPhoto(datos, caption=f"📖 {fuente}") for fuente, datos in figuras]
-            )
+            await update.effective_chat.send_media_group([InputMediaPhoto(datos, caption=pie) for pie, datos in figuras])
     except Exception:  # una figura que Telegram no acepta no debe dejar al estudiante sin respuesta
         registro.exception("No se pudieron enviar las figuras")
 
@@ -158,26 +181,16 @@ async def contestar(update: Update, context: ContextTypes.DEFAULT_TYPE, pregunta
         return
     context.user_data["ultima"] = pregunta
     await update.effective_chat.send_action(ChatAction.TYPING)
-    resultados = await asyncio.to_thread(biblioteca.buscar, pregunta, 8, aspecto)
-    if not resultados:
+    preparado = await asyncio.to_thread(preparar, pregunta, aspecto)
+    if not preparado:
         await update.effective_chat.send_message(NO_ENCONTRE)
         return
-    # Solo el nombre de una estructura: se responde con todos sus aspectos.
-    secciones = []
-    if aspecto is None and es_estructura(pregunta):
-        secciones = await asyncio.to_thread(biblioteca.resumen, pregunta)
-    if secciones:
-        de_secciones = [r for _, r in secciones]
-        textos = {r.texto for r in de_secciones}
-        resultados = de_secciones + [r for r in resultados if r.texto not in textos][:4]
-        mostrados = de_secciones
-    else:
-        mostrados = resultados[:3]
+    texto, parrafos, paginas = preparado
     respuesta = None
     if tutor and puede_usar_ia(update.effective_user.id):
-        respuesta = await tutor.responder(pregunta, aspecto, resultados)
-    await enviar_figuras(update, await asyncio.to_thread(biblioteca.figuras, mostrados))
-    await enviar(update, respuesta or (con_secciones(secciones) if secciones else con_fragmentos(resultados)), botones())
+        respuesta = await tutor.responder(pregunta, aspecto, parrafos)
+    await enviar_figuras(update, await asyncio.to_thread(biblioteca.figuras, paginas, pregunta))
+    await enviar(update, respuesta or texto, botones())
 
 
 # ---------- comandos ----------
@@ -253,6 +266,7 @@ async def al_recibir_archivo(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await update.effective_chat.send_message(mensaje)
     if titulos:
         biblioteca.guardar_archivo(documento.file_id, nombre, titulos)
+        await copiar(context.bot, update.effective_chat.id, titulos)
         await respaldar(context.bot)
 
 
@@ -265,9 +279,34 @@ async def al_fallar(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
 # ---------- carga de libros ----------
 
 
+async def copiar(bot, chat: int, titulos: list[str]) -> None:
+    """Guarda en el chat una copia ya procesada de cada libro.
+
+    Leer un PDF tarda minutos en un servidor pequeño; recuperar la copia, segundos.
+    """
+    for titulo in titulos:
+        try:
+            partes = await asyncio.to_thread(biblioteca.exportar, titulo)
+            ids = []
+            for n, parte in enumerate(partes, 1):
+                mensaje = await bot.send_document(
+                    chat,
+                    InputFile(parte, filename=f"copia-{n}-de-{len(partes)}.finlay"),
+                    caption=f"📦 Copia de «{titulo}» ({n}/{len(partes)}). No la borres: con ella arranco rápido tras un reinicio.",
+                    disable_notification=True,
+                    read_timeout=180,
+                    write_timeout=180,
+                )
+                ids.append(mensaje.document.file_id)
+            biblioteca.guardar_copia(titulo, ids)
+        except Exception:
+            registro.exception("No se pudo guardar la copia de %s", titulo)
+
+
 async def respaldar(bot) -> None:
-    """Deja anclada, en el chat de cada administrador, la lista de archivos de la biblioteca."""
-    texto = MARCA + json.dumps(biblioteca.archivos(), ensure_ascii=False)
+    """Deja anclada, en el chat de cada administrador, la lista de archivos y copias de la biblioteca."""
+    contenido = {"archivos": biblioteca.archivos(), "copias": biblioteca.copias()}
+    texto = MARCA + json.dumps(contenido, ensure_ascii=False)
     if len(texto) > 4096:
         registro.warning("El respaldo no cabe en un mensaje: hay demasiados archivos")
         return
@@ -280,8 +319,18 @@ async def respaldar(bot) -> None:
             registro.warning("No se pudo dejar el respaldo a %s: %s", admin, error)
 
 
+async def _bajar(bot, file_id: str) -> bytes:
+    archivo = await bot.get_file(file_id)
+    return bytes(await archivo.download_as_bytearray())
+
+
+def _importar(partes: list[bytes]) -> str:
+    with _un_libro_a_la_vez:
+        return biblioteca.importar(partes)
+
+
 async def restaurar(bot) -> None:
-    """Si la biblioteca está vacía, vuelve a cargar los archivos del respaldo anclado."""
+    """Si la biblioteca está vacía, la recupera del respaldo anclado: primero las copias, que son rápidas."""
     estado["restaurando"] = True
     try:
         for admin in ADMINS:
@@ -291,10 +340,24 @@ async def restaurar(bot) -> None:
                 continue
             if not anclado or not (anclado.text or "").startswith(MARCA):
                 continue
-            for file_id, nombre in json.loads(anclado.text[len(MARCA) :]):
+            contenido = json.loads(anclado.text[len(MARCA) :])
+            if isinstance(contenido, list):  # respaldo de una versión anterior: solo archivos
+                contenido = {"archivos": contenido, "copias": {}}
+            cambio = False
+            for titulo, ids in contenido["copias"].items():
                 try:
-                    archivo = await bot.get_file(file_id)
-                    datos = bytes(await archivo.download_as_bytearray())
+                    await asyncio.to_thread(_importar, [await _bajar(bot, i) for i in ids])
+                    biblioteca.guardar_copia(titulo, ids)
+                    registro.info("Recuperado de su copia: %s", titulo)
+                except Exception:
+                    registro.exception("No sirvió la copia de %s; se leerá el archivo original", titulo)
+            for file_id, nombre, *resto in contenido["archivos"]:
+                titulos = resto[0] if resto else []
+                if titulos and all(biblioteca.tiene(t) for t in titulos):
+                    biblioteca.guardar_archivo(file_id, nombre, titulos)
+                    continue
+                try:
+                    datos = await _bajar(bot, file_id)
                 except TelegramError as error:
                     registro.error("No se pudo recuperar %s: %s", nombre, error)
                     continue
@@ -302,6 +365,10 @@ async def restaurar(bot) -> None:
                 registro.info("Restaurado %s:\n%s", nombre, mensaje)
                 if titulos:
                     biblioteca.guardar_archivo(file_id, nombre, titulos)
+                    await copiar(bot, admin, titulos)
+                    cambio = True
+            if cambio:
+                await respaldar(bot)
             return
     except Exception:
         registro.exception("Falló la restauración de la biblioteca")

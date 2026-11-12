@@ -5,9 +5,11 @@ Morfofisiología I, II y III: le escribes una estructura o una pregunta y respon
 con lo que dicen los libros, citando **libro y página**. Si no está en los libros
 responde *"No encontré eso en los libros"*.
 
-- **Estructura completa con fotos**: escribes solo la estructura (`órgano de la visión`)
-  y envía las figuras que el libro trae en esas páginas y, debajo, el texto por
-  apartados: anatomía, relaciones, histología, embriología, fisiología e irrigación.
+- **Estructura completa con fotos**: escribes solo la estructura (`corazón`). El bot
+  busca **la parte del libro donde se trata** (un solo libro, páginas seguidas) y de ahí
+  saca todo: las figuras con su pie y, debajo, el texto por apartados: relaciones,
+  histología, embriología, fisiología e irrigación. No mezcla libros ni trae menciones
+  sueltas de otros capítulos.
 - Pregunta concreta: `¿cuáles son las relaciones del estómago?`
 - Por aspecto: `/anatomia`, `/relaciones`, `/histologia`, `/embriologia`,
   `/fisiologia`, `/irrigacion` seguidos de la estructura (o los botones que salen
@@ -60,11 +62,11 @@ docker run -d --restart always -v finlaymed:/datos \
 **El token y las claves van en las variables del servidor, nunca en este repositorio.**
 
 La biblioteca se guarda en `DATA_DIR`. Muchos planes gratuitos borran el disco en
-cada reinicio; para eso el bot lleva un **respaldo automático**: cada vez que el
-administrador le envía un libro, deja anclado en ese chat un mensaje con la lista
-de archivos. Si al arrancar la biblioteca está vacía, el bot lee ese mensaje, vuelve
-a pedirle los archivos a Telegram y los carga solo (tarda unos minutos).
-**No borres ni desancles ese mensaje.**
+cada reinicio; para eso el bot lleva un **respaldo automático** en el chat del
+administrador: una **copia ya procesada** de cada libro (archivos `.finlay`) y un
+mensaje anclado con la lista. Si al arrancar la biblioteca está vacía, el bot baja
+esas copias y queda listo en segundos, sin volver a leer los PDF (que en un servidor
+pequeño tarda minutos). **No borres esos archivos ni desancles el mensaje.**
 
 ### Render (gratis)
 
