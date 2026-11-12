@@ -5,6 +5,7 @@ Cada libro se guarda por páginas, partido en fragmentos. La búsqueda usa BM25
 libro y de qué página sale.
 """
 
+import gc
 import hashlib
 import io
 import json
@@ -37,6 +38,7 @@ ASPECTOS = {
 
 TAM_FRAGMENTO = 1000
 FIGURAS_POR_PAGINA = 3
+PAGINAS_POR_TANDA = 3
 
 
 def normalizar(texto: str) -> str:
@@ -346,11 +348,21 @@ def leer_pdf(datos: bytes) -> tuple[list[tuple[int, str]], list[tuple[int, bytes
     """Texto y figuras de cada página."""
     from pypdf import PdfReader
 
-    lector = PdfReader(io.BytesIO(datos))
     paginas, figuras = [], []
-    for i, pagina in enumerate(lector.pages, 1):
-        paginas.append((i, pagina.extract_text() or ""))
-        figuras += [(i, d) for d in _figuras_de(pagina)]
+    lector = PdfReader(io.BytesIO(datos))
+    total = len(lector.pages)
+    for i in range(total):
+        # pypdf guarda en memoria cada imagen que descomprime. Con un libro de cientos de figuras
+        # eso agota la memoria del servidor, así que el lector se renueva cada pocas páginas.
+        if i and i % PAGINAS_POR_TANDA == 0:
+            del lector
+            gc.collect()
+            lector = PdfReader(io.BytesIO(datos))
+        pagina = lector.pages[i]
+        paginas.append((i + 1, pagina.extract_text() or ""))
+        figuras += [(i + 1, d) for d in _figuras_de(pagina)]
+    del lector
+    gc.collect()
     # Una imagen repetida en muchas páginas es un logotipo o un adorno, no una figura.
     veces = Counter(hashlib.md5(d).digest() for _, d in figuras)
     return paginas, [(n, d) for n, d in figuras if veces[hashlib.md5(d).digest()] <= 3]

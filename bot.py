@@ -52,6 +52,7 @@ _usos: dict[tuple[int, datetime.date], int] = {}
 # Sirve para volver a cargar los libros solo cuando el servidor borra el disco al reiniciar.
 MARCA = "📌 Respaldo de la biblioteca de Finlaymed_bot. No borres ni desancles este mensaje.\n"
 estado = {"restaurando": False, "tarea": None}
+_un_libro_a_la_vez = threading.Lock()
 
 AYUDA = """Soy el bot de Morfofisiología. Respondo con lo que dicen los libros de Morfofisiología I, II y III, y te digo de qué libro y página sale.
 
@@ -313,7 +314,7 @@ async def al_arrancar(aplicacion: Application) -> None:
         estado["tarea"] = asyncio.create_task(restaurar(aplicacion.bot))
 
 
-def cargar(nombre: str, datos: bytes) -> tuple[str, list[str]]:
+def _cargar(nombre: str, datos: bytes) -> tuple[str, list[str]]:
     """Guarda en la biblioteca los libros de un archivo. Devuelve el mensaje y los títulos guardados."""
     try:
         libros = leer_archivo(nombre, datos)
@@ -331,6 +332,12 @@ def cargar(nombre: str, datos: bytes) -> tuple[str, list[str]]:
         except ValueError as error:
             lineas.append(f"⚠️ {error}")
     return "\n".join(lineas) or "Ese archivo no trae libros.", titulos
+
+
+def cargar(nombre: str, datos: bytes) -> tuple[str, list[str]]:
+    """Como _cargar, pero de uno en uno: leer dos libros a la vez no cabe en la memoria del servidor."""
+    with _un_libro_a_la_vez:
+        return _cargar(nombre, datos)
 
 
 def cargar_al_arrancar() -> None:
