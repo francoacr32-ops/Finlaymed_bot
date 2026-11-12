@@ -252,6 +252,8 @@ class Biblioteca:
         figuras: list[tuple[int, bytes]] | None = None,
     ) -> int:
         """Guarda un libro (reemplaza el que tenga el mismo título). Devuelve los fragmentos guardados."""
+        # Algunos PDF traen caracteres rotos que la base de datos no admite.
+        paginas = [(n, texto.encode("utf-8", "ignore").decode("utf-8").replace("\x00", "")) for n, texto in paginas]
         filas, pies, encabezado = [], [], ""
         for n, texto in paginas:
             bloques, de_pagina, encabezado = partir_pagina(texto, encabezado)

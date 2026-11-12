@@ -19,6 +19,7 @@ import logging
 import os
 import re
 import threading
+import traceback
 import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -51,7 +52,7 @@ _usos: dict[tuple[int, datetime.date], int] = {}
 # El respaldo es un mensaje anclado en el chat del administrador con los archivos enviados.
 # Sirve para volver a cargar los libros solo cuando el servidor borra el disco al reiniciar.
 MARCA = "📌 Respaldo de la biblioteca de Finlaymed_bot. No borres ni desancles este mensaje.\n"
-estado = {"restaurando": False, "tarea": None}
+estado = {"restaurando": False, "tarea": None, "error": ""}
 _un_libro_a_la_vez = threading.Lock()
 
 AYUDA = """Soy el bot de Morfofisiología. Respondo con lo que dicen los libros de Morfofisiología I, II y III, y te digo de qué libro y página sale.
@@ -81,7 +82,8 @@ AYUDA_ADMIN = """
 
 Administrador:
 • Envíame un libro como archivo (PDF, .txt de «Exportar texto» de Finlay, o paquete de Finlay .json/.zip) y lo agrego. Máximo 20 MB por archivo. Las figuras solo salen de los PDF.
-• /borrar número — quita un libro (el número sale en /libros)."""
+• /borrar número — quita un libro (el número sale en /libros).
+• /estado — qué estoy haciendo y el último error, si hubo."""
 
 
 def es_admin(update: Update) -> bool:
@@ -297,6 +299,20 @@ async def cmd_borrar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     await update.effective_chat.send_message(f"Borrado: {titulo}" if titulo else "No hay un libro con ese número.")
 
 
+async def cmd_estado(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not es_admin(update):
+        return
+    libros = biblioteca.libros()
+    lineas = [
+        "⏳ Recuperando los libros tras un reinicio." if estado["restaurando"] else "Sin tareas en curso.",
+        f"Libros cargados: {len(libros)}" + "".join(f"\n• {t} ({p} páginas, {f} figuras)" for _, t, p, f in libros),
+        f"Copias rápidas: {len(biblioteca.copias())}",
+        f"IA: {ia.MODELO if tutor else 'desactivada'}",
+        f"Último error:\n{estado['error']}" if estado["error"] else "Sin errores.",
+    ]
+    await enviar(update, "\n".join(lineas))
+
+
 def cmd_aspecto(aspecto: str):
     async def manejador(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await contestar(update, context, " ".join(context.args or []), aspecto)
@@ -411,7 +427,14 @@ async def restaurar(bot) -> None:
                 continue
             if not anclado or not (anclado.text or "").startswith(MARCA):
                 continue
+            async def avisar(texto: str) -> None:
+                try:
+                    await bot.send_message(admin, texto, disable_notification=True)
+                except TelegramError:
+                    pass
+
             contenido = json.loads(anclado.text[len(MARCA) :])
+            await avisar("⏳ Me reinicié y estoy recuperando los libros. Te aviso cuando termine; mientras tanto no envíes archivos.")
             if isinstance(contenido, list):  # respaldo de una versión anterior: solo archivos
                 contenido = {"archivos": contenido, "copias": {}}
             cambio = False
@@ -421,7 +444,7 @@ async def restaurar(bot) -> None:
                     biblioteca.guardar_copia(titulo, ids)
                     registro.info("Recuperado de su copia: %s", titulo)
                 except Exception:
-                    registro.exception("No sirvió la copia de %s; se leerá el archivo original", titulo)
+                    anotar_error(f"No sirvió la copia de «{titulo}»; leo el archivo original")
             for file_id, nombre, *resto in contenido["archivos"]:
                 titulos = resto[0] if resto else []
                 if titulos and all(biblioteca.tiene(t) for t in titulos):
@@ -434,17 +457,31 @@ async def restaurar(bot) -> None:
                     continue
                 mensaje, titulos = await asyncio.to_thread(cargar, nombre, datos)
                 registro.info("Restaurado %s:\n%s", nombre, mensaje)
+                await avisar(mensaje)
                 if titulos:
                     biblioteca.guardar_archivo(file_id, nombre, titulos)
                     await copiar(bot, admin, titulos)
                     cambio = True
             if cambio:
                 await respaldar(bot)
+            cuantos = len(biblioteca.libros())
+            await avisar(f"✅ Listo: {cuantos} libros cargados. Ya puedes preguntar." if cuantos else f"⚠️ No pude recuperar ningún libro.\n{estado['error']}")
             return
     except Exception:
-        registro.exception("Falló la restauración de la biblioteca")
+        anotar_error("Falló la restauración de la biblioteca")
+        for admin in ADMINS:
+            try:
+                await bot.send_message(admin, f"⚠️ No pude recuperar los libros. Reenvía esta nota a quien mantiene el bot:\n{estado['error']}")
+            except Exception:
+                pass
     finally:
         estado["restaurando"] = False
+
+
+def anotar_error(que: str) -> None:
+    """Guarda el último error (para /estado) y lo deja en el registro. Se llama dentro de un except."""
+    registro.exception(que)
+    estado["error"] = f"{que}\n" + "".join(traceback.format_exc().splitlines(keepends=True)[-6:])[-900:]
 
 
 async def al_arrancar(aplicacion: Application) -> None:
@@ -459,7 +496,7 @@ def _cargar(nombre: str, datos: bytes) -> tuple[str, list[str]]:
     except ValueError as error:
         return str(error), []
     except Exception:
-        registro.exception("No se pudo leer %s", nombre)
+        anotar_error(f"No se pudo leer {nombre}")
         return f"No pude leer «{nombre}». Puede estar dañado o protegido con contraseña.", []
     lineas, titulos = [], []
     for titulo, etiqueta, paginas, figuras in libros:
@@ -469,6 +506,9 @@ def _cargar(nombre: str, datos: bytes) -> tuple[str, list[str]]:
             lineas.append(f"✅ {titulo}: {len(paginas)} páginas, {len(figuras)} figuras")
         except ValueError as error:
             lineas.append(f"⚠️ {error}")
+        except Exception as error:
+            anotar_error(f"No se pudo guardar {titulo}")
+            lineas.append(f"⚠️ No pude guardar «{titulo}» ({type(error).__name__}). Escribe /estado y reenvía lo que salga.")
     return "\n".join(lineas) or "Ese archivo no trae libros.", titulos
 
 
@@ -537,6 +577,7 @@ def crear_aplicacion(token: str) -> Application:
     aplicacion.add_handler(CommandHandler("id", cmd_id))
     aplicacion.add_handler(CommandHandler("libros", cmd_libros))
     aplicacion.add_handler(CommandHandler("borrar", cmd_borrar))
+    aplicacion.add_handler(CommandHandler("estado", cmd_estado))
     for aspecto in ASPECTOS:
         aplicacion.add_handler(CommandHandler(aspecto, cmd_aspecto(aspecto)))
     aplicacion.add_handler(CallbackQueryHandler(al_pulsar, pattern=r"^a:"))
