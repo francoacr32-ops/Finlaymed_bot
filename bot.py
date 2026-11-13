@@ -31,7 +31,7 @@ from telegram.error import TelegramError
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
 
 import ia
-from biblioteca import ASPECTOS, Biblioteca, Resultado, es_estructura, leer_archivo, normalizar
+from biblioteca import ASPECTOS, Biblioteca, Resultado, aspecto_pedido, es_estructura, leer_archivo, normalizar
 
 logging.basicConfig(format="%(asctime)s %(levelname)s %(name)s: %(message)s", level=logging.INFO)
 logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -55,25 +55,24 @@ MARCA = "📌 Respaldo de la biblioteca de Finlaymed_bot. No borres ni desancles
 estado = {"restaurando": False, "tarea": None, "error": ""}
 _un_libro_a_la_vez = threading.Lock()
 
-AYUDA = """Soy el bot de Morfofisiología. Respondo con lo que dicen los libros de Morfofisiología I, II y III, y te digo de qué libro y página sale.
+AYUDA = """Soy el bot de Morfofisiología. Respondo con lo que dicen los libros y te digo de qué libro y página sale.
 
-Escríbeme el nombre de una estructura o una pregunta. Por ejemplo:
-• riñón
-• ¿Cuáles son las relaciones del estómago?
-• origen embriológico del corazón
+Escríbeme un tema: un órgano, un hueso, un tejido, un sistema. Por ejemplo:
+• corazón
+• cráneo
+• tejido epitelial
+• sistema inmune
+
+Voy al libro donde se trata, te envío sus figuras y te doy lo esencial en cuatro apartados: anatomía, histología, embriología y fisiología.
+
+Para un solo apartado usa los botones de abajo de cada respuesta, o escríbelo:
+• histología del estómago
+• /embriologia corazón
+
+También entiendo:
 • 5 detalles anatómicos del fémur
 • 3 figuras del corazón
-• tejido epitelial
-
-Si escribes solo la estructura (por ejemplo: corazón) voy a la parte del libro donde se trata y te envío sus figuras y, debajo, su anatomía, relaciones, histología, embriología y fisiología.
-
-Debajo de cada respuesta hay botones para pedir un aspecto concreto de lo mismo. También puedes escribirlo directamente:
-/anatomia hígado
-/relaciones hígado
-/histologia hígado
-/embriologia hígado
-/fisiologia hígado
-/irrigacion hígado
+• ¿Cuáles son las relaciones del estómago?
 
 /libros — libros que tengo cargados
 /ayuda — este mensaje"""
@@ -92,7 +91,7 @@ def es_admin(update: Update) -> bool:
 
 def botones() -> InlineKeyboardMarkup:
     claves = list(ASPECTOS)
-    filas = [claves[:3], claves[3:]]
+    filas = [claves[:2], claves[2:]]
     return InlineKeyboardMarkup(
         [[InlineKeyboardButton(ASPECTOS[c][0], callback_data=f"a:{c}") for c in fila] for fila in filas]
     )
@@ -107,8 +106,23 @@ def recortar(texto: str, maximo: int = 900) -> str:
     return corto[: punto + 1] if punto > maximo // 2 else corto.rsplit(" ", 1)[0] + "…"
 
 
-def _parrafo(r: Resultado) -> str:
-    return f"{r.etiqueta} {r.pagina}\n{recortar(r.texto)}"
+def desde_oracion(texto: str) -> str:
+    """Si el párrafo empieza a mitad de una frase (viene de la página anterior), arranca en la siguiente."""
+    if texto[:1].islower():
+        punto = texto.find(". ")
+        if 0 < punto < len(texto) // 2:
+            return texto[punto + 2 :]
+    return texto
+
+
+def _puntos(oraciones: list[Resultado], numerados: bool = False) -> str:
+    return "\n".join(
+        f"{f'{n}.' if numerados else '•'} {r.texto} ({r.etiqueta} {r.pagina})" for n, r in enumerate(oraciones, 1)
+    )
+
+
+def _cabecera(simbolo: str, titulo: str, tema) -> str:
+    return f"{simbolo} {titulo.strip().upper()}\n📖 {tema.titulo} · se trata desde la {tema.etiqueta} {tema.ancla}"
 
 
 _NUMEROS = {"un": 1, "una": 1, "uno": 1, "dos": 2, "tres": 3, "cuatro": 4, "cinco": 5, "seis": 6, "siete": 7, "ocho": 8, "nueve": 9, "diez": 10}
@@ -156,46 +170,49 @@ def preparar_pedido(pregunta: str) -> tuple[str, list[Resultado], list[tuple[str
             return None
         paginas = [(tema.titulo, p) for p in tema.paginas]
         hay = len(biblioteca.figuras(paginas, estructura, cantidad))
-        texto = f"🖼 {pregunta.strip().upper()}\n📖 {tema.fuente}\n\n" + (
+        texto = _cabecera("🖼", pregunta, tema) + "\n\n" + (
             "Estas son las figuras de esa parte del libro." if hay >= cantidad
             else f"En esa parte del libro solo hay {hay}." if hay
             else "En esa parte del libro no hay figuras."
         )
-        return texto, [biblioteca._resultado(i) for i in tema.indices[:10]], paginas, cantidad
-    hallado = biblioteca.oraciones(estructura, cantidad, aspecto)
+        return texto, biblioteca.parrafos(tema, []), paginas, cantidad
+    hallado = biblioteca.esenciales(estructura, cantidad, aspecto)
     if not hallado or not hallado[1]:
         return None
-    tema, oraciones = hallado
-    lineas = [f"{n}. {recortar(r.texto, 400)} ({r.etiqueta} {r.pagina})" for n, r in enumerate(oraciones, 1)]
-    texto = f"📋 {pregunta.strip().upper()}\n📖 {tema.fuente}\n\n" + "\n\n".join(lineas)
-    if len(oraciones) < cantidad:
-        texto += f"\n\nSolo encontré {len(oraciones)} en esa parte del libro."
-    return texto, [biblioteca._resultado(i) for i in tema.indices[:10]], [(r.titulo, r.pagina) for r in oraciones], 2
+    tema, por_aspecto = hallado
+    # Sin apartado pedido se toman las mejores de todos, en el orden del libro.
+    todas = sorted((r for lista in por_aspecto.values() for r in lista), key=lambda r: -r.puntos)[:cantidad]
+    todas.sort(key=lambda r: (r.pagina, r.parrafo))
+    texto = _cabecera("📋", pregunta, tema) + "\n\n" + _puntos(todas, numerados=True)
+    if len(todas) < cantidad:
+        texto += f"\n\nSolo encontré {len(todas)} en ese libro."
+    return texto, biblioteca.parrafos(tema, todas), [(r.titulo, r.pagina) for r in todas], 2
 
 
 def preparar(pregunta: str, aspecto: str | None) -> tuple[str, list[Resultado], list[tuple[str, int]]] | None:
     """Arma la respuesta sin IA. Devuelve (texto, párrafos usados, páginas donde buscar figuras)."""
-    if aspecto in ASPECTOS:
-        hallado = biblioteca.aspecto(pregunta, aspecto)
-        if hallado:
-            tema, parrafos = hallado
-            texto = f"{ASPECTOS[aspecto][0].upper()} · {pregunta}\n📖 {tema.fuente}\n\n" + "\n\n".join(map(_parrafo, parrafos))
-            return texto, parrafos, [(r.titulo, r.pagina) for r in parrafos]
-    elif es_estructura(pregunta):
-        hallado = biblioteca.resumen(pregunta)
-        if hallado:
-            # Todo sale de un solo lugar: la parte del libro donde se trata la estructura.
-            tema, entrada, secciones = hallado
-            partes = [f"🔎 {pregunta.upper()}\n📖 {tema.fuente}", recortar(entrada.texto)]
-            partes += [f"{ASPECTOS[a][0].upper()} · {_parrafo(r)}" for a, r in secciones]
-            usados = [entrada] + [r for _, r in secciones]
-            paginas = [(r.titulo, r.pagina) for r in usados] + [(tema.titulo, p) for p in tema.paginas]
-            return "\n\n".join(partes), usados, paginas
-        return None
+    if aspecto is None and aspecto_pedido(pregunta):  # «histología del estómago»
+        aspecto, pregunta = aspecto_pedido(pregunta)
+    if aspecto in ASPECTOS or es_estructura(pregunta):
+        # Lo esencial de un tema, todo del libro donde se trata.
+        hallado = biblioteca.esenciales(pregunta, 6 if aspecto else 3, aspecto)
+        if hallado and hallado[1]:
+            tema, por_aspecto = hallado
+            usadas = [r for lista in por_aspecto.values() for r in lista]
+            if aspecto:
+                texto = _cabecera("🔎", f"{ASPECTOS[aspecto][0]} · {pregunta}", tema) + "\n\n" + _puntos(usadas)
+            else:
+                partes = [_cabecera("🔎", pregunta, tema)]
+                partes += [f"{ASPECTOS[a][0].upper()}\n{_puntos(por_aspecto[a])}" for a in ASPECTOS if a in por_aspecto]
+                texto = "\n\n".join(partes)
+            paginas = [(r.titulo, r.pagina) for r in usadas] + [(tema.titulo, p) for p in tema.paginas]
+            return texto, biblioteca.parrafos(tema, usadas), paginas
+        if aspecto is None:
+            return None
     resultados = biblioteca.buscar(pregunta, 6, aspecto)
     if not resultados:
         return None
-    texto = "\n\n".join(f"📖 {r.fuente}\n{recortar(r.texto)}" for r in resultados[:3])
+    texto = "\n\n".join(f"📖 {r.fuente}\n{recortar(desde_oracion(r.texto))}" for r in resultados[:3])
     return texto, resultados, [(r.titulo, r.pagina) for r in resultados[:3]]
 
 
@@ -237,7 +254,7 @@ async def enviar(update: Update, texto: str, teclado: InlineKeyboardMarkup | Non
 async def contestar(update: Update, context: ContextTypes.DEFAULT_TYPE, pregunta: str, aspecto: str | None) -> None:
     pregunta = pregunta.strip()
     if not pregunta:
-        await update.effective_chat.send_message("Escribe la estructura después del comando. Ejemplo: /relaciones estómago")
+        await update.effective_chat.send_message("Escribe el tema después del comando. Ejemplo: /histologia estómago")
         return
     if not biblioteca.libros():
         await update.effective_chat.send_message(

@@ -27,37 +27,32 @@ VACIAS = set(
     "ensename ponme pon sacame saca busca buscame necesito acerca cuales todo toda todos todas".split()
 )
 
-# Cada aspecto de una estructura: (nombre, palabras que lo nombran, palabras que lo acompañan).
+# Los cuatro apartados de una estructura: (nombre, palabras que lo nombran, palabras que lo acompañan).
 ASPECTOS = {
     "anatomia": (
         "Anatomía",
-        "anatomia anatomica anatomico situacion situado situada localizado localizada localizacion configuracion",
-        "forma porciones caras bordes extremos externa macroscopica dimensiones peso cara borde",
-    ),
-    "relaciones": (
-        "Relaciones",
-        "relaciones relaciona relacionan relacionado relacionada limita limitado vecindad",
-        "anterior posterior lateral medial superior inferior delante detras",
+        "anatomia anatomica anatomico situacion situado situada localizado localizada localizacion configuracion "
+        "relaciones relaciona relacionan limita irrigacion irrigado irriga inervacion inervado inerva",
+        "forma porciones porcion caras cara bordes borde extremos externa macroscopica dimensiones peso pesa mide "
+        "anterior posterior lateral medial superior inferior arteria vena nervio hueso articula cavidad "
+        "ocupa extiende divide formado compuesto consta",
     ),
     "histologia": (
         "Histología",
-        "histologia histologica histologico microscopica microscopico epitelio epitelial",
-        "tejido celulas capas tunica mucosa fibras conectivo estroma parenquima",
+        "histologia histologica histologico microscopica microscopico microscopio epitelio epitelial endotelio",
+        "tejido celulas celula capas capa tunica mucosa fibras conectivo estroma parenquima membrana basal revestido tapizado",
     ),
     "embriologia": (
         "Embriología",
-        "embriologia embriologico embrionario embrion desarrollo deriva derivan derivado primordio esbozo",
-        "origen semana mesodermo endodermo ectodermo primitivo formacion",
+        "embriologia embriologico embrionario embrionaria embrion desarrollo deriva derivan derivado primordio esbozo "
+        "mesodermo endodermo ectodermo mesenquima fetal feto",
+        "origen origina semana semanas primitivo primitiva formacion tubo",
     ),
     "fisiologia": (
         "Fisiología",
-        "fisiologia fisiologico fisiologica funcion funciones funcional",
-        "mecanismo regulacion control",
-    ),
-    "irrigacion": (
-        "Irrigación e inervación",
-        "irrigacion irrigado irriga irrigan inervacion inervado inerva vascularizacion drenaje",
-        "arteria arterial vena venoso linfatico nervio",
+        "fisiologia fisiologico fisiologica funcion funciones funcional funciona",
+        "mecanismo regulacion regula control controla permite bombea contraccion potencial secreta produce "
+        "transporta presion flujo gasto actividad responde interviene participa",
     ),
 }
 
@@ -126,6 +121,7 @@ class Resultado:
     texto: str
     encabezado: str = ""
     puntos: float = 0.0
+    parrafo: int = -1  # de qué fragmento salió, cuando el texto es una sola oración
 
     @property
     def fuente(self) -> str:
@@ -140,6 +136,7 @@ class Tema:
     etiqueta: str
     paginas: list[int]
     indices: list[int]  # fragmentos de esas páginas, en el orden del libro
+    ancla: int = 0  # la página donde empieza a tratarse
 
     @property
     def fuente(self) -> str:
@@ -456,6 +453,7 @@ class Biblioteca:
             total = len(principales)
             minimo = total if total <= 3 else math.ceil(total * 0.6)
             rara = max(idf, key=idf.get)
+            define = _definicion(principales)
             puntos: dict[tuple[str, int], float] = {}
             for clave, cuenta in self._cuenta_pagina.items():
                 if not cuenta[rara] or sum(1 for t in principales if cuenta[t]) < minimo:
@@ -465,6 +463,8 @@ class Biblioteca:
                 valor = sum(idf[t] * min(cuenta[t], 6) for t in principales)
                 if set(principales) <= self._titulos_pagina[clave]:
                     valor *= 3  # la página tiene un apartado con ese título
+                if define and any(self._cuentas[i][rara] and define.search(normalizar(self._filas[i][3])) for i in self._de_pagina[clave]):
+                    valor += 8 * idf[rara]  # aquí se presenta: «El corazón es…»
                 puntos[clave] = valor
             if not puntos:
                 return None
@@ -492,7 +492,7 @@ class Biblioteca:
                 inicio = ancla - 1
             paginas = [p for p in range(inicio, fin + 1) if (titulo, p) in self._de_pagina]
             indices = [i for p in paginas for i in self._de_pagina[(titulo, p)]]
-            return Tema(titulo, self._filas[indices[0]][2], paginas, indices)
+            return Tema(titulo, self._filas[indices[0]][2], paginas, indices, ancla)
 
     def _juntas(self, i: int, principales: list[str]) -> bool:
         """¿Aparecen todas esas palabras casi seguidas en el fragmento?"""
@@ -502,84 +502,66 @@ class Biblioteca:
         ancho = len(principales) + 2
         return any(set(principales) <= set(palabras[j : j + ancho]) for j in range(len(palabras)))
 
-    def _relevancia(self, i: int, principales: list[str]) -> float:
-        return sum(self._idf(t) * min(self._cuentas[i][t], 3) for t in principales)
+    def esenciales(
+        self, consulta: str, n: int = 3, solo: str | None = None
+    ) -> tuple[Tema, dict[str, list[Resultado]]] | None:
+        """Lo esencial de un tema: sus oraciones clave, repartidas en anatomía, histología, embriología y fisiología.
 
-    def del_aspecto(self, tema: Tema, consulta: str, aspecto: str, k: int = 1, salvo: set[int] = frozenset()) -> list[int]:
-        """Los fragmentos del tema que tratan ese aspecto (anatomía, histología…), del mejor al peor."""
-        fuertes, debiles = set(terminos(ASPECTOS[aspecto][1])), set(terminos(ASPECTOS[aspecto][2]))
-        principales = list(dict.fromkeys(terminos(consulta)))
-        candidatos = []
-        for i in tema.indices:
-            if i in salvo:
-                continue
-            cuenta = self._cuentas[i]
-            en_titulo = bool((fuertes | debiles) & set(terminos(self._filas[i][4] or "")))
-            n_fuertes = sum(min(cuenta[t], 3) for t in fuertes)
-            n_debiles = sum(min(cuenta[t], 2) for t in debiles)
-            distintas = sum(1 for t in debiles if cuenta[t])
-            if not (en_titulo or n_fuertes or distintas >= 3):
-                continue
-            valor = 5 * en_titulo + 2 * n_fuertes + n_debiles + 0.3 * self._relevancia(i, principales)
-            candidatos.append((valor, -i))
-        return [-i for _, i in sorted(candidatos, reverse=True)[:k]]
-
-    def resumen(self, consulta: str) -> tuple[Tema, Resultado, list[tuple[str, Resultado]]] | None:
-        """Para una estructura: dónde se trata, el párrafo que la presenta y el mejor de cada aspecto."""
+        Todo sale del libro donde se trata el tema. Cada oración nombra el tema (así se entiende sola)
+        y va al apartado cuyas palabras usa. Devuelve hasta n por apartado, en el orden del libro.
+        """
         with self._candado:
             tema = self.tema(consulta)
             if not tema:
                 return None
             principales = list(dict.fromkeys(terminos(consulta)))
-            # La presentación: el párrafo que más habla de la estructura; si empatan, el primero.
-            entrada = max(tema.indices, key=lambda i: (self._relevancia(i, principales), -i))
-            usados = {entrada}
-            secciones = []
-            for aspecto in ASPECTOS:
-                elegidos = self.del_aspecto(tema, consulta, aspecto, 1, usados)
-                if elegidos:
-                    usados.add(elegidos[0])
-                    secciones.append((aspecto, self._resultado(elegidos[0])))
-            return tema, self._resultado(entrada), secciones
-
-    def aspecto(self, consulta: str, aspecto: str, k: int = 3) -> tuple[Tema, list[Resultado]] | None:
-        """Un aspecto concreto de una estructura, buscado en la parte del libro que la trata."""
-        with self._candado:
-            tema = self.tema(consulta)
-            if not tema:
-                return None
-            elegidos = self.del_aspecto(tema, consulta, aspecto, k)
-            return (tema, [self._resultado(i) for i in sorted(elegidos)]) if elegidos else None
-
-    def oraciones(self, consulta: str, n: int, aspecto: str | None = None) -> tuple[Tema, list[Resultado]] | None:
-        """Las n oraciones que más dicen de una estructura (o de uno de sus aspectos), en el orden del libro."""
-        with self._candado:
-            tema = self.tema(consulta)
-            if not tema:
-                return None
-            principales = set(terminos(consulta))
-            fuertes = set(terminos(ASPECTOS[aspecto][1])) if aspecto in ASPECTOS else set()
-            debiles = set(terminos(ASPECTOS[aspecto][2])) if aspecto in ASPECTOS else set()
-            candidatas, vistas = [], set()
-            for orden, i in enumerate(tema.indices):
-                del_tema = bool(principales & set(self._cuentas[i]))  # el párrafo habla de la estructura
-                for oracion in re.split(r"(?<=[.!?])\s+(?=[A-ZÁÉÍÓÚÑ])", self._filas[i][3]):
+            rara = max(principales, key=self._idf)
+            define = _definicion(principales)
+            cerca = set(tema.paginas)
+            candidatas: dict[str, list] = {a: [] for a in ASPECTOS}
+            vistas: set[str] = set()
+            orden = 0
+            for i, (titulo, pagina, etiqueta, texto, encabezado) in enumerate(self._filas):
+                if titulo != tema.titulo or not self._cuentas[i][rara]:
+                    continue
+                del_titulo = set(terminos(encabezado or ""))
+                for oracion in re.split(r"(?<=[.!?])\s+(?=[A-ZÁÉÍÓÚÑ])", texto):
                     oracion = oracion.strip()
-                    if not 40 <= len(oracion) <= 400 or oracion in vistas:
+                    # Completa (empieza con mayúscula y termina en punto) y de un tamaño que se pueda repasar.
+                    if not 40 <= len(oracion) <= 380 or not oracion[0].isupper() or oracion[-1] != "." or oracion in vistas:
+                        continue
+                    palabras = set(terminos(oracion))
+                    if not (set(principales) <= palabras if len(principales) <= 2 else rara in palabras):
                         continue
                     vistas.add(oracion)
-                    palabras = set(terminos(oracion))
-                    valor = 3 * bool(principales & palabras) + del_tema
-                    if aspecto in ASPECTOS:
-                        del_aspecto = 2 * len(fuertes & palabras) + len(debiles & palabras)
-                        if not del_aspecto:
+                    presenta = bool(define and define.search(normalizar(oracion)))
+                    mejor, valor = None, 0
+                    for aspecto in ASPECTOS:
+                        fuertes, debiles = _PALABRAS[aspecto]
+                        v = 2 * len(fuertes & palabras) + len(debiles & palabras) + 2 * bool(fuertes & del_titulo)
+                        if v > valor:
+                            mejor, valor = aspecto, v
+                    if mejor is None:
+                        if not presenta:
                             continue
-                        valor += del_aspecto
-                    if valor >= 3:
-                        candidatas.append((valor, -orden, len(candidatas), i, oracion))
-            mejores = sorted(sorted(candidatas, reverse=True)[:n], key=lambda c: c[2])
-            fila = self._filas
-            return tema, [Resultado(fila[i][0], fila[i][1], fila[i][2], oracion) for _, _, _, i, oracion in mejores]
+                        mejor = "anatomia"
+                    if solo and mejor != solo:
+                        continue
+                    total = valor + 3 * presenta + 2 * (pagina in cerca)
+                    candidatas[mejor].append((total, -orden, orden, Resultado(titulo, pagina, etiqueta, oracion, encabezado or "", total, i)))
+                    orden += 1
+            elegidas = {}
+            for aspecto, lista in candidatas.items():
+                mejores = sorted(sorted(lista, key=lambda c: c[:2], reverse=True)[:n], key=lambda c: c[2])
+                if mejores:
+                    elegidas[aspecto] = [c[3] for c in mejores]
+            return tema, elegidas
+
+    def parrafos(self, tema: Tema, oraciones: list[Resultado], maximo: int = 10) -> list[Resultado]:
+        """Los párrafos completos de donde salieron esas oraciones (y el arranque del tema), para dar contexto."""
+        with self._candado:
+            indices = list(dict.fromkeys([r.parrafo for r in oraciones if r.parrafo >= 0] + tema.indices[:3]))
+            return [self._resultado(i) for i in sorted(indices)[:maximo]]
 
     def figuras(self, paginas: list[tuple[str, int]], consulta: str = "", maximo: int = 4) -> list[tuple[str, bytes]]:
         """Figuras de esas páginas (título, página), con su pie. Primero las que nombran lo consultado."""
@@ -612,14 +594,40 @@ class Biblioteca:
         return salida
 
 
+_PALABRAS = {a: (set(terminos(f)), set(terminos(d)) - set(terminos(f))) for a, (_, f, d) in ASPECTOS.items()}
+
+
 def _propias(aspecto: str) -> set[str]:
-    return set(terminos(ASPECTOS[aspecto][1] + " " + ASPECTOS[aspecto][2]))
+    return _PALABRAS[aspecto][0] | _PALABRAS[aspecto][1]
+
+
+def _definicion(principales: list[str]) -> re.Pattern | None:
+    """Reconoce la oración que presenta el tema: «El corazón es…», «La sangre está formada…»."""
+    if not principales:
+        return None
+    return re.compile(
+        rf"\b(?:el|la|los|las)\s+(?:\w+\s+){{0,3}}?{re.escape(principales[-1])}\w{{0,3}}\s+"
+        r"(?:es|son|esta|estan|constituye|constituyen|tiene|tienen|presenta|presentan|posee|forma|forman|se\s+\w+)\b"
+    )
+
+
+def aspecto_pedido(consulta: str) -> tuple[str, str] | None:
+    """«histología del estómago» → ("histologia", "estomago"): un apartado nombrado en la pregunta."""
+    palabras = terminos(consulta)
+    hallados = {a for a in ASPECTOS for t in palabras if t in _PALABRAS[a][0]}
+    if len(hallados) != 1 or "?" in consulta:
+        return None
+    aspecto = hallados.pop()
+    resto = [p for p in consulta.split() if not set(terminos(p)) & _PALABRAS[aspecto][0]]
+    while resto and normalizar(resto[0]) in VACIAS:  # «histología del estómago» → «estómago»
+        resto.pop(0)
+    return (aspecto, " ".join(resto)) if 0 < len(terminos(" ".join(resto))) <= 4 else None
 
 
 def es_estructura(consulta: str) -> bool:
     """¿Es solo el nombre de una estructura («órgano de la visión») y no una pregunta concreta?"""
     palabras = terminos(consulta)
-    de_aspecto = {t for _, fuertes, _ in ASPECTOS.values() for t in terminos(fuertes)}
+    de_aspecto = {t for fuertes, _ in _PALABRAS.values() for t in fuertes}
     return "?" not in consulta and 0 < len(palabras) <= 4 and not de_aspecto & set(palabras)
 
 

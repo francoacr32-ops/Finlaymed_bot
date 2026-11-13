@@ -5,15 +5,13 @@ Morfofisiología I, II y III: le escribes una estructura o una pregunta y respon
 con lo que dicen los libros, citando **libro y página**. Si no está en los libros
 responde *"No encontré eso en los libros"*.
 
-- **Estructura completa con fotos**: escribes solo la estructura (`corazón`). El bot
-  busca **la parte del libro donde se trata** (un solo libro, páginas seguidas) y de ahí
-  saca todo: las figuras con su pie y, debajo, el texto por apartados: relaciones,
-  histología, embriología, fisiología e irrigación. No mezcla libros ni trae menciones
-  sueltas de otros capítulos.
-- Pregunta concreta: `¿cuáles son las relaciones del estómago?`
-- Por aspecto: `/anatomia`, `/relaciones`, `/histologia`, `/embriologia`,
-  `/fisiologia`, `/irrigacion` seguidos de la estructura (o los botones que salen
-  debajo de cada respuesta).
+- **Un tema** (`corazón`, `cráneo`, `tejido epitelial`, `sistema inmune`): el bot va al
+  libro donde se trata, envía sus figuras con su pie y da **lo esencial** en cuatro
+  apartados: anatomía, histología, embriología y fisiología. Son oraciones completas del
+  libro, cada una con su página; no mezcla libros.
+- **Un solo apartado**: `histología del estómago`, `/embriologia corazón` o los botones.
+- **Con cantidad**: `5 detalles anatómicos del fémur`, `3 figuras del corazón`.
+- **Pregunta concreta**: `¿cuáles son las relaciones del estómago?`
 - `/libros` muestra los libros cargados.
 
 Tiene dos modos:

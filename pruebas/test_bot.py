@@ -132,33 +132,37 @@ class Busqueda(unittest.TestCase):
         self.b = bib.Biblioteca(":memory:")
         biblioteca_de_prueba(self.b)
 
-    def test_el_tema_es_un_solo_lugar_del_libro(self):
+    def test_el_tema_empieza_donde_el_libro_lo_presenta(self):
         tema = self.b.tema("corazón")
-        self.assertEqual((tema.titulo, tema.paginas), ("Tomo III", [120, 121, 122]))
-        self.assertEqual(tema.fuente, "Tomo III, pág. 120–122")
+        self.assertEqual((tema.titulo, tema.ancla, tema.paginas), ("Tomo III", 120, [120, 121, 122]))
 
-    def test_resumen_ordenado_y_de_un_solo_libro(self):
-        tema, entrada, secciones = self.b.resumen("corazón")
-        self.assertTrue(entrada.texto.startswith("El corazón es un órgano muscular hueco"))
-        donde = {a: r for a, r in secciones}
-        self.assertTrue(donde["relaciones"].texto.startswith("Por delante el corazón se relaciona"))
-        self.assertIn("endocardio", donde["histologia"].texto)
-        self.assertIn("deriva del mesodermo esplácnico", donde["embriologia"].texto)
-        self.assertIn("arterias coronarias", donde["irrigacion"].texto)
-        self.assertIn("bombear la sangre", donde["fisiologia"].texto)
-        # Ni el prólogo, ni la carótida, ni el otro tomo.
-        self.assertEqual({r.titulo for _, r in secciones}, {"Tomo III"})
-        self.assertTrue(all(120 <= r.pagina <= 122 for _, r in secciones))
+    def test_lo_esencial_en_cuatro_apartados_y_de_un_solo_libro(self):
+        tema, por_aspecto = self.b.esenciales("corazón")
+        self.assertEqual(list(por_aspecto), ["anatomia", "histologia", "embriologia", "fisiologia"])
+        textos = {a: [r.texto for r in lista] for a, lista in por_aspecto.items()}
+        self.assertEqual(textos["anatomia"][0], "El corazón es un órgano muscular hueco situado en el mediastino medio.")
+        self.assertIn("Por delante el corazón se relaciona con el esternón y los cartílagos costales.", textos["anatomia"])
+        self.assertTrue(textos["histologia"][0].startswith("La pared del corazón tiene tres capas"))
+        self.assertEqual(textos["embriologia"], ["El corazón deriva del mesodermo esplácnico."])
+        self.assertEqual(textos["fisiologia"], ["La función del corazón es bombear la sangre."])
+        todas = [r for lista in por_aspecto.values() for r in lista]
+        # Ni el prólogo, ni la carótida, ni el otro tomo; y cada oración nombra el tema.
+        self.assertEqual({r.titulo for r in todas}, {"Tomo III"})
+        self.assertTrue(all(120 <= r.pagina <= 122 and "corazón" in r.texto for r in todas))
+        self.assertTrue(all(len(lista) <= 3 for lista in por_aspecto.values()))
 
-    def test_aspecto_dentro_del_tema(self):
-        tema, parrafos = self.b.aspecto("corazón", "embriologia")
-        self.assertEqual(parrafos[0].pagina, 121)
-        self.assertIsNone(self.b.aspecto("riñón", "embriologia"))
+    def test_un_solo_apartado(self):
+        _, por_aspecto = self.b.esenciales("corazón", 6, "embriologia")
+        self.assertEqual(list(por_aspecto), ["embriologia"])
+        self.assertEqual(bib.aspecto_pedido("histología del estómago"), ("histologia", "estómago"))
+        self.assertEqual(bib.aspecto_pedido("relaciones del corazón"), ("anatomia", "corazón"))
+        self.assertIsNone(bib.aspecto_pedido("corazón"))
+        self.assertIsNone(bib.aspecto_pedido("¿Cuál es la función del riñón?"))
 
     def test_lo_que_no_esta_no_aparece(self):
         # «órgano» está en todas partes; «visión» solo en el prólogo; el ojo no está en estos libros.
-        self.assertIsNone(self.b.resumen("páncreas"))
-        self.assertIsNone(self.b.resumen("órgano del olfato"))
+        self.assertIsNone(self.b.esenciales("páncreas"))
+        self.assertIsNone(self.b.esenciales("órgano de la visión"))
         self.assertEqual(self.b.buscar("páncreas"), [])
         self.assertEqual(self.b.buscar("órgano del olfato"), [])
         self.assertEqual(self.b.buscar("el de la"), [])
@@ -172,6 +176,7 @@ class Busqueda(unittest.TestCase):
         self.assertTrue(bib.es_estructura("órgano de la visión"))
         self.assertTrue(bib.es_estructura("arteria tibial anterior"))
         self.assertFalse(bib.es_estructura("¿Dónde está el riñón?"))
+        self.assertTrue(bib.es_estructura("sistema inmune"))
         self.assertFalse(bib.es_estructura("desarrollo del corazón"))
 
     def test_figuras_con_su_pie_y_primero_las_que_nombran_la_estructura(self):
@@ -332,22 +337,27 @@ class Chat(unittest.TestCase):
         asyncio.run(bot.al_recibir_archivo(self.update(usuario=7, documento=grande), contexto))
         self.assertIn("20 MB", self.enviados[-1][0])
 
-    def test_estructura_ordenada_con_sus_fotos(self):
+    def test_tema_con_lo_esencial_y_sus_fotos(self):
         biblioteca_de_prueba(bot.biblioteca)
         contexto = self.contexto()
         asyncio.run(bot.al_escribir(self.update(texto="corazón"), contexto))
         texto, teclado = self.enviados[-1]
-        self.assertTrue(texto.startswith("🔎 CORAZÓN\n📖 Tomo III, pág. 120–122\n\nEl corazón es un órgano muscular hueco"))
-        orden = [texto.index(t) for t in ("RELACIONES · pág. 120", "HISTOLOGÍA · pág. 121", "EMBRIOLOGÍA · pág. 121", "FISIOLOGÍA · pág. 122")]
+        self.assertTrue(texto.startswith(
+            "🔎 CORAZÓN\n📖 Tomo III · se trata desde la pág. 120\n\n"
+            "ANATOMÍA\n• El corazón es un órgano muscular hueco situado en el mediastino medio. (pág. 120)"))
+        orden = [texto.index(t) for t in ("ANATOMÍA\n", "HISTOLOGÍA\n", "EMBRIOLOGÍA\n• El corazón deriva", "FISIOLOGÍA\n• La función del corazón")]
         self.assertEqual(orden, sorted(orden))
-        for ajeno in ("Prólogo", "carótida", "Tomo I,", "trilaminar"):
+        for ajeno in ("Prólogo", "carótida", "Tomo I ", "trilaminar", "RELACIONES", "IRRIGACIÓN"):
             self.assertNotIn(ajeno, texto)
-        self.assertEqual(len([b for fila in teclado.inline_keyboard for b in fila]), 6)
+        self.assertLess(len(texto), 1200)
+        self.assertEqual([b.text for fila in teclado.inline_keyboard for b in fila], ["Anatomía", "Histología", "Embriología", "Fisiología"])
         self.assertEqual(len(self.fotos), 2)
         self.assertTrue(self.fotos[0].startswith("📖 Tomo III, pág. 120\nFig. 5.1. Vista anterior del corazón"))
 
-        asyncio.run(bot.cmd_aspecto("relaciones")(self.update(), self.contexto("corazón")))
-        self.assertTrue(self.enviados[-1][0].startswith("RELACIONES · corazón\n📖 Tomo III, pág. 120–122\n\npág. 120\nPor delante"))
+        asyncio.run(bot.cmd_aspecto("embriologia")(self.update(), self.contexto("corazón")))
+        self.assertEqual(self.enviados[-1][0], "🔎 EMBRIOLOGÍA · CORAZÓN\n📖 Tomo III · se trata desde la pág. 120\n\n• El corazón deriva del mesodermo esplácnico. (pág. 121)")
+        asyncio.run(bot.al_escribir(self.update(texto="histología del corazón"), contexto))
+        self.assertTrue(self.enviados[-1][0].startswith("🔎 HISTOLOGÍA · CORAZÓN\n"))
 
         asyncio.run(bot.al_escribir(self.update(texto="órgano de la visión"), contexto))
         self.assertEqual(self.enviados[-1][0], bot.NO_ENCONTRE)
@@ -361,8 +371,8 @@ class Chat(unittest.TestCase):
         biblioteca_de_prueba(bot.biblioteca)
         asyncio.run(bot.al_escribir(self.update(texto="Muéstrame 3 detalles anatómicos del corazón"), self.contexto()))
         texto = self.enviados[-1][0]
-        self.assertTrue(texto.startswith("📋 MUÉSTRAME 3 DETALLES ANATÓMICOS DEL CORAZÓN\n📖 Tomo III, pág. 120–122\n\n1. El corazón es un órgano muscular hueco situado en el mediastino medio. (pág. 120)"))
-        self.assertIn("\n\n2. Tiene forma de cono, con una base, un vértice y tres caras. (pág. 120)", texto)
+        self.assertTrue(texto.startswith("📋 MUÉSTRAME 3 DETALLES ANATÓMICOS DEL CORAZÓN\n📖 Tomo III · se trata desde la pág. 120\n\n1. El corazón es un órgano muscular hueco situado en el mediastino medio. (pág. 120)"))
+        self.assertIn("\n3. El corazón está irrigado por las arterias coronarias derecha e izquierda. (pág. 122)", texto)
         self.assertNotIn("4. ", texto)
 
         self.fotos.clear()
@@ -406,12 +416,12 @@ class Chat(unittest.TestCase):
         self.assertEqual(len(anclado["copias"]["Tomo III"]), 1)
 
     def test_pdf_con_figuras_de_punta_a_punta(self):
-        pdf = pdf_minimo("El ojo u organo de la vision esta situado en la orbita", figuras=((640, 480), (500, 400)))
+        pdf = pdf_minimo("El ojo u organo de la vision esta situado dentro de la orbita.", figuras=((640, 480), (500, 400)))
         self.enviar_libro("Morfo II.pdf", pdf)
         self.assertIn("✅ Morfo II: 1 páginas, 2 figuras", " ".join(t for t, _ in self.enviados))
         asyncio.run(bot.al_escribir(self.update(texto="órgano de la visión"), self.contexto()))
         self.assertEqual(self.fotos, ["📖 Morfo II, pág. 1", "📖 Morfo II, pág. 1"])
-        self.assertTrue(self.enviados[-1][0].startswith("🔎 ÓRGANO DE LA VISIÓN\n📖 Morfo II, pág. 1\n\nEl ojo u organo"))
+        self.assertTrue(self.enviados[-1][0].startswith("🔎 ÓRGANO DE LA VISIÓN\n📖 Morfo II · se trata desde la pág. 1\n\nANATOMÍA\n• El ojo u organo"))
 
     def test_mensaje_largo_se_parte(self):
         asyncio.run(bot.enviar(self.update(), "línea de texto\n" * 700, "teclado"))
