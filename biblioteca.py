@@ -169,8 +169,10 @@ def _es_encabezado(linea: str, anterior: str | None, siguiente: str | None) -> b
         return False
     if linea.isupper() and len(linea) > 4:
         return True
+    # Los libros a dos columnas tienen renglones cortos: el título se reconoce porque viene tras un
+    # párrafo cerrado, no termina en punto y lo que sigue empieza otra oración.
     cerrado = anterior is None or anterior[-1] in ".:?!"
-    return cerrado and siguiente is not None and siguiente[:1].isupper() and len(siguiente) > 40
+    return cerrado and siguiente is not None and siguiente[:1].isupper() and not _PIE.match(siguiente)
 
 
 def partir_pagina(texto: str, encabezado: str = "") -> tuple[list[tuple[str, str]], list[str], str]:
@@ -236,6 +238,12 @@ class Biblioteca:
                 "SELECT l.id, l.titulo, l.paginas, (SELECT COUNT(*) FROM figuras g WHERE g.libro_id = l.id) "
                 "FROM libros l ORDER BY l.titulo"
             ).fetchall()
+
+    def crudo(self, libro_id: int, pagina: int) -> str | None:
+        """El texto de una página tal como salió del PDF, con sus renglones (para revisar cómo viene el libro)."""
+        with self._candado:
+            fila = self._db.execute("SELECT texto FROM crudo WHERE libro_id = ? AND pagina = ?", (libro_id, pagina)).fetchone()
+            return fila[0] if fila else None
 
     def tiene(self, titulo: str) -> bool:
         with self._candado:
@@ -535,9 +543,9 @@ class Biblioteca:
                         continue
                     vistas.add(oracion)
                     presenta = bool(define and define.search(normalizar(oracion)))
-                    # Fuera de la parte donde se trata el tema, solo valen las oraciones que hablan de él
-                    # (lo nombran al empezar), no las que lo mencionan de pasada.
-                    if pagina not in cerca and not presenta and rara not in terminos(oracion)[:4]:
+                    # Solo valen las oraciones que hablan del tema (lo nombran al empezar), no las que lo
+                    # mencionan de pasada: «Su cabeza se articula con el capítulo del húmero» es del radio.
+                    if not presenta and rara not in terminos(oracion)[:3]:
                         continue
                     mejor, valor = None, 0
                     for aspecto in ASPECTOS:
@@ -560,6 +568,56 @@ class Biblioteca:
                 if mejores:
                     elegidas[aspecto] = [c[3] for c in mejores]
             return tema, elegidas
+
+    def seccion(self, consulta: str, maximo: int = 24) -> tuple[Tema, str, list[Resultado]] | None:
+        """El apartado que el libro le dedica al tema, entero y oración por oración.
+
+        Si el libro tiene un título con ese nombre («Húmero»), es todo lo que va bajo ese título.
+        Si no, es el párrafo que lo presenta («El húmero es…») y los que siguen bajo el mismo título.
+        Devuelve (tema, título del apartado, oraciones), o None si el libro no lo trata así.
+        """
+        with self._candado:
+            tema = self.tema(consulta)
+            if not tema:
+                return None
+            principales = set(terminos(consulta))
+            define = _definicion(list(dict.fromkeys(terminos(consulta))))
+            del_libro = [i for i, fila in enumerate(self._filas) if fila[0] == tema.titulo]
+
+            def titulado(i: int) -> bool:
+                del_titulo = terminos(self._filas[i][4] or "")
+                return principales <= set(del_titulo) and len(del_titulo) <= len(principales) + 2
+
+            con_titulo = [i for i in del_libro if titulado(i)]
+            if con_titulo:
+                inicio = min(con_titulo, key=lambda i: (abs(self._filas[i][1] - tema.ancla), i))
+                while inicio - 1 in con_titulo:
+                    inicio -= 1
+            else:
+                presentan = [
+                    i for i in tema.indices if define and self._cuentas[i] and define.search(normalizar(self._filas[i][3]))
+                ]
+                if not presentan:
+                    return None
+                inicio = presentan[0]
+            encabezado = self._filas[inicio][4] or ""
+            indices = [inicio]
+            while (
+                indices[-1] + 1 < len(self._filas)
+                and self._filas[indices[-1] + 1][0] == tema.titulo
+                and (self._filas[indices[-1] + 1][4] or "") == encabezado
+                and len(indices) < 12
+            ):
+                indices.append(indices[-1] + 1)
+            oraciones = []
+            for i in indices:
+                titulo, pagina, etiqueta, texto, _ = self._filas[i]
+                for oracion in oraciones_completas(texto, 600, 15):
+                    oraciones.append(Resultado(titulo, pagina, etiqueta, oracion, encabezado, 0.0, i))
+            if not oraciones:
+                return None
+            tema.ancla = oraciones[0].pagina
+            return tema, encabezado, oraciones[:maximo]
 
     def sobre(self, tema_pedido: str, foco: str, n: int = 5) -> tuple[Tema, list[Resultado]] | None:
         """Un punto concreto dentro de un tema: «células» del «tejido óseo», «cabeza» del «húmero».
@@ -649,10 +707,10 @@ def _definicion(principales: list[str]) -> re.Pattern | None:
     )
 
 
-def oraciones_completas(texto: str, maximo: int = 380) -> list[str]:
+def oraciones_completas(texto: str, maximo: int = 380, minimo: int = 40) -> list[str]:
     """Las oraciones enteras de un párrafo: empiezan con mayúscula, terminan en punto y se pueden repasar."""
     partes = (o.strip() for o in re.split(r"(?<=[.!?])\s+(?=[A-ZÁÉÍÓÚÑ])", texto))
-    return [o for o in partes if 40 <= len(o) <= maximo and o[0].isupper() and o[-1] == "."]
+    return [o for o in partes if minimo <= len(o) <= maximo and o[0].isupper() and o[-1] == "."]
 
 
 def partir_foco(consulta: str) -> tuple[str, str] | None:

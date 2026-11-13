@@ -87,7 +87,8 @@ AYUDA_ADMIN = """
 Administrador:
 • Envíame un libro como archivo (PDF, .txt de «Exportar texto» de Finlay, o paquete de Finlay .json/.zip) y lo agrego. Máximo 20 MB por archivo. Las figuras solo salen de los PDF.
 • /borrar número — quita un libro (el número sale en /libros).
-• /estado — qué estoy haciendo y el último error, si hubo."""
+• /estado — qué estoy haciendo y el último error, si hubo.
+• /pagina libro página — cómo leí esa página del PDF (para revisar un libro)."""
 
 
 def es_admin(update: Update) -> bool:
@@ -213,15 +214,26 @@ def preparar(pregunta: str, aspecto: str | None) -> tuple[str, list[Resultado], 
             texto = _cabecera("🔎", pregunta, tema) + "\n\n" + _puntos(oraciones)
             return texto, biblioteca.parrafos(tema, oraciones), [(r.titulo, r.pagina) for r in oraciones]
     if aspecto in ASPECTOS or es_estructura(pregunta):
-        # Lo esencial de un tema, todo del libro donde se trata.
-        hallado = biblioteca.esenciales(pregunta, 6 if aspecto else 3, aspecto)
-        if hallado and hallado[1]:
-            tema, por_aspecto = hallado
-            usadas = [r for lista in por_aspecto.values() for r in lista]
+        # Primero, el apartado que el libro le dedica al tema, entero. Después, lo esencial de cada
+        # asignatura que el libro diga en otras páginas. Todo del mismo libro.
+        apartado = biblioteca.seccion(pregunta) if aspecto is None else None
+        ya_dichas = {r.texto for r in apartado[2]} if apartado else set()
+        hallado = biblioteca.esenciales(pregunta, 6 if aspecto else 3 + len(ya_dichas), aspecto)
+        por_aspecto = {}
+        if hallado:
+            for a, lista in hallado[1].items():
+                nuevas = [r for r in lista if r.texto not in ya_dichas][: 6 if aspecto else 3]
+                if nuevas:
+                    por_aspecto[a] = nuevas
+        if apartado or por_aspecto:
+            tema = apartado[0] if apartado else hallado[0]
+            usadas = (apartado[2] if apartado else []) + [r for lista in por_aspecto.values() for r in lista]
             if aspecto:
                 texto = _cabecera("🔎", f"{ASPECTOS[aspecto][0]} · {pregunta}", tema) + "\n\n" + _puntos(usadas)
             else:
                 partes = [_cabecera("🔎", pregunta, tema)]
+                if apartado:
+                    partes.append(_puntos(apartado[2]))
                 partes += [f"{ASPECTOS[a][0].upper()}\n{_puntos(por_aspecto[a])}" for a in ASPECTOS if a in por_aspecto]
                 texto = "\n\n".join(partes)
             paginas = [(r.titulo, r.pagina) for r in usadas] + [(tema.titulo, p) for p in tema.paginas]
@@ -359,6 +371,17 @@ async def cmd_estado(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         f"Último error:\n{estado['error']}" if estado["error"] else "Sin errores.",
     ]
     await enviar(update, "\n".join(lineas))
+
+
+async def cmd_pagina(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/pagina 2 95 — muestra cómo se leyó la página 95 del libro 2, renglón por renglón."""
+    if not es_admin(update):
+        return
+    if len(context.args or []) != 2 or not all(a.isdigit() for a in context.args):
+        await update.effective_chat.send_message("Uso: /pagina libro página. Ejemplo: /pagina 2 95 (el número del libro sale en /libros)")
+        return
+    texto = biblioteca.crudo(int(context.args[0]), int(context.args[1]))
+    await enviar(update, texto[:3900] if texto else "No tengo esa página.")
 
 
 def cmd_aspecto(aspecto: str):
@@ -626,6 +649,7 @@ def crear_aplicacion(token: str) -> Application:
     aplicacion.add_handler(CommandHandler("libros", cmd_libros))
     aplicacion.add_handler(CommandHandler("borrar", cmd_borrar))
     aplicacion.add_handler(CommandHandler("estado", cmd_estado))
+    aplicacion.add_handler(CommandHandler("pagina", cmd_pagina))
     for aspecto in ASPECTOS:
         aplicacion.add_handler(CommandHandler(aspecto, cmd_aspecto(aspecto)))
     aplicacion.add_handler(CallbackQueryHandler(al_pulsar, pattern=r"^a:"))

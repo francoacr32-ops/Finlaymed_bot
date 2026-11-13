@@ -61,6 +61,34 @@ TEJIDO ÓSEO
 El tejido óseo es un tejido conectivo especializado cuya matriz está calcificada. El tejido óseo forma los huesos.
 Las células del tejido óseo son: los osteoblastos, los osteocitos y los osteoclastos. Los osteoblastos sintetizan
 la matriz del tejido óseo. La función del tejido óseo es de sostén y de reserva de calcio."""
+HUESOS = """88
+Huesos del miembro superior
+El esqueleto del miembro superior
+comprende la cintura y la parte libre.
+Clavícula
+La clavícula es un hueso largo en
+forma de S. Se articula con el
+esternón y con la escápula.
+Húmero
+El húmero es el hueso del brazo.
+Presenta un cuerpo y dos extremos.
+En el extremo proximal se halla la
+cabeza, que se articula con la
+escápula. Por debajo están el cuello
+anatómico y los tubérculos mayor y
+menor. En el extremo distal se
+encuentran la tróclea y el capítulo.
+Fig. 3.4. Húmero derecho, vista
+anterior.
+Radio
+El radio es el hueso lateral del
+antebrazo. Su cabeza se articula
+con el capítulo del húmero."""
+OSIFICACION = """140
+Osificación de los huesos largos
+El húmero se osifica a partir de un
+centro primario que aparece en la
+octava semana del desarrollo."""
 RINON = "El riñón es un órgano par situado en el espacio retroperitoneal. Tiene dos caras, dos bordes y dos polos."
 
 
@@ -155,6 +183,26 @@ class Busqueda(unittest.TestCase):
         self.assertEqual({r.titulo for r in todas}, {"Tomo III"})
         self.assertTrue(all(120 <= r.pagina <= 122 and "corazón" in r.texto for r in todas))
         self.assertTrue(all(len(lista) <= 3 for lista in por_aspecto.values()))
+
+    def test_el_apartado_del_libro_entero(self):
+        # Libro a dos columnas: renglones cortos, un título por hueso, y el húmero nombrado al hablar del radio.
+        self.b.agregar("Tomo I", [(88, HUESOS), (140, OSIFICACION)], figuras=[(88, b"fig-88")])
+        tema, titulo, oraciones = self.b.seccion("húmero")
+        self.assertEqual((tema.titulo, tema.ancla, titulo), ("Tomo I", 88, "Húmero"))
+        self.assertEqual([r.texto for r in oraciones], [
+            "El húmero es el hueso del brazo.",
+            "Presenta un cuerpo y dos extremos.",
+            "En el extremo proximal se halla la cabeza, que se articula con la escápula.",
+            "Por debajo están el cuello anatómico y los tubérculos mayor y menor.",
+            "En el extremo distal se encuentran la tróclea y el capítulo.",
+        ])
+        # Lo de otras páginas del mismo libro entra en su asignatura; lo del radio, no.
+        _, por_aspecto = self.b.esenciales("húmero")
+        self.assertEqual([r.pagina for r in por_aspecto["embriologia"]], [140])
+        self.assertFalse(any("Su cabeza" in r.texto for lista in por_aspecto.values() for r in lista))
+        self.assertEqual(self.b.figuras([("Tomo I", 88)], "húmero")[0][0], "📖 Tomo I, pág. 88\nFig. 3.4. Húmero derecho, vista anterior.")
+        self.assertEqual([r.texto for r in self.b.seccion("clavícula")[2]],
+                         ["La clavícula es un hueso largo en forma de S.", "Se articula con el esternón y con la escápula."])
 
     def test_un_solo_apartado(self):
         _, por_aspecto = self.b.esenciales("corazón", 6, "embriologia")
@@ -347,14 +395,18 @@ class Chat(unittest.TestCase):
         contexto = self.contexto()
         asyncio.run(bot.al_escribir(self.update(texto="corazón"), contexto))
         texto, teclado = self.enviados[-1]
+        # Primero el apartado «CORAZÓN» del libro, entero; después lo esencial de cada asignatura.
         self.assertTrue(texto.startswith(
             "🔎 CORAZÓN\n📖 Tomo III · se trata desde la pág. 120\n\n"
-            "ANATOMÍA\n• El corazón es un órgano muscular hueco situado en el mediastino medio. (pág. 120)"))
+            "• El corazón es un órgano muscular hueco situado en el mediastino medio. (pág. 120)\n"
+            "• Tiene forma de cono, con una base, un vértice y tres caras. (pág. 120)\n"
+            "• El corazón pesa unos 300 gramos. (pág. 120)\n\nANATOMÍA\n• Por delante el corazón se relaciona"))
         orden = [texto.index(t) for t in ("ANATOMÍA\n", "HISTOLOGÍA\n", "EMBRIOLOGÍA\n• El corazón deriva", "FISIOLOGÍA\n• La función del corazón")]
         self.assertEqual(orden, sorted(orden))
         for ajeno in ("Prólogo", "carótida", "Tomo I ", "trilaminar", "RELACIONES", "IRRIGACIÓN"):
             self.assertNotIn(ajeno, texto)
-        self.assertLess(len(texto), 1200)
+        self.assertLess(len(texto), 1400)
+        self.assertEqual(texto.count("El corazón es un órgano muscular hueco"), 1)  # sin repetir lo ya dicho
         self.assertEqual([b.text for fila in teclado.inline_keyboard for b in fila], ["Anatomía", "Histología", "Embriología", "Fisiología"])
         self.assertEqual(len(self.fotos), 2)
         self.assertTrue(self.fotos[0].startswith("📖 Tomo III, pág. 120\nFig. 5.1. Vista anterior del corazón"))
@@ -442,7 +494,7 @@ class Chat(unittest.TestCase):
         self.assertIn("✅ Morfo II: 1 páginas, 2 figuras", " ".join(t for t, _ in self.enviados))
         asyncio.run(bot.al_escribir(self.update(texto="órgano de la visión"), self.contexto()))
         self.assertEqual(self.fotos, ["📖 Morfo II, pág. 1", "📖 Morfo II, pág. 1"])
-        self.assertTrue(self.enviados[-1][0].startswith("🔎 ÓRGANO DE LA VISIÓN\n📖 Morfo II · se trata desde la pág. 1\n\nANATOMÍA\n• El ojo u organo"))
+        self.assertTrue(self.enviados[-1][0].startswith("🔎 ÓRGANO DE LA VISIÓN\n📖 Morfo II · se trata desde la pág. 1\n\n• El ojo u organo"))
 
     def test_mensaje_largo_se_parte(self):
         asyncio.run(bot.enviar(self.update(), "línea de texto\n" * 700, "teclado"))
