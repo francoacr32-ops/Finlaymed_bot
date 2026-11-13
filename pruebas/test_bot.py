@@ -56,6 +56,11 @@ GENERAL = """40
 Hojas germinativas
 El embrión trilaminar da origen a todos los órganos: del mesodermo derivan el corazón, los
 vasos y la sangre. El desarrollo embrionario sigue en la cuarta semana."""
+OSEO = """50
+TEJIDO ÓSEO
+El tejido óseo es un tejido conectivo especializado cuya matriz está calcificada. El tejido óseo forma los huesos.
+Las células del tejido óseo son: los osteoblastos, los osteocitos y los osteoclastos. Los osteoblastos sintetizan
+la matriz del tejido óseo. La función del tejido óseo es de sostén y de reserva de calcio."""
 RINON = "El riñón es un órgano par situado en el espacio retroperitoneal. Tiene dos caras, dos bordes y dos polos."
 
 
@@ -366,12 +371,14 @@ class Chat(unittest.TestCase):
         self.assertEqual(bot.pedido("Muéstrame 5 detalles anatómicos del corazón"), ("lista", 5, "anatomia", "muestrame del corazon"))
         self.assertEqual(bot.pedido("tres figuras del tejido epitelial")[:3], ("figuras", 3, None))
         self.assertEqual(bot.pedido("dos funciones del corazón")[:3], ("lista", 2, "fisiologia"))
-        self.assertIsNone(bot.pedido("¿Cuáles son las relaciones del estómago?"))
+        self.assertEqual(bot.pedido("detalles anatómicos del húmero"), ("lista", 5, "anatomia", "del humero"))
+        self.assertIsNone(bot.pedido("¿Dónde está el riñón?"))
+        self.assertIsNone(bot.pedido("partes del estómago"))
 
         biblioteca_de_prueba(bot.biblioteca)
         asyncio.run(bot.al_escribir(self.update(texto="Muéstrame 3 detalles anatómicos del corazón"), self.contexto()))
         texto = self.enviados[-1][0]
-        self.assertTrue(texto.startswith("📋 MUÉSTRAME 3 DETALLES ANATÓMICOS DEL CORAZÓN\n📖 Tomo III · se trata desde la pág. 120\n\n1. El corazón es un órgano muscular hueco situado en el mediastino medio. (pág. 120)"))
+        self.assertTrue(texto.startswith("📋 3 DETALLES ANATÓMICOS DEL CORAZÓN\n📖 Tomo III · se trata desde la pág. 120\n\n1. El corazón es un órgano muscular hueco situado en el mediastino medio. (pág. 120)"))
         self.assertIn("\n3. El corazón está irrigado por las arterias coronarias derecha e izquierda. (pág. 122)", texto)
         self.assertNotIn("4. ", texto)
 
@@ -380,6 +387,20 @@ class Chat(unittest.TestCase):
         asyncio.run(bot.al_escribir(self.update(texto="5 figuras del corazón"), self.contexto()))
         self.assertEqual(len(self.fotos), 3)  # una del primer pedido y las dos que hay en el segundo
         self.assertIn("solo hay 2", self.enviados[-1][0])
+        # Pedir más de lo que hay no rellena con el prólogo ni con otro capítulo.
+        asyncio.run(bot.al_escribir(self.update(texto="detalles anatómicos del corazón"), self.contexto()))
+        texto = self.enviados[-1][0]
+        self.assertIn("Solo encontré 3 en ese libro.", texto)
+        self.assertNotIn("Este libro ofrece", texto)
+        self.assertNotIn("carótida", texto)
+
+        bot.biblioteca.agregar("Tomo II", [(50, OSEO)])
+        asyncio.run(bot.al_escribir(self.update(texto="Dime las células del tejido óseo"), self.contexto()))
+        self.assertEqual(self.enviados[-1][0], "🔎 CÉLULAS DEL TEJIDO ÓSEO\n📖 Tomo II · se trata desde la pág. 50\n\n"
+                         "• Las células del tejido óseo son: los osteoblastos, los osteocitos y los osteoclastos. (pág. 50)")
+        asyncio.run(bot.al_escribir(self.update(texto="¿Con qué se relaciona el corazón por detrás?"), self.contexto()))
+        self.assertIn("• Por detrás limita con el esófago y la aorta descendente. (Tomo III, pág. 120)", self.enviados[-1][0])
+
         asyncio.run(bot.al_escribir(self.update(texto="4 detalles del páncreas"), self.contexto()))
         self.assertEqual(self.enviados[-1][0], bot.NO_ENCONTRE)
 

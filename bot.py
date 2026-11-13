@@ -31,7 +31,10 @@ from telegram.error import TelegramError
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
 
 import ia
-from biblioteca import ASPECTOS, Biblioteca, Resultado, aspecto_pedido, es_estructura, leer_archivo, normalizar
+from biblioteca import (
+    ASPECTOS, VACIAS, Biblioteca, Resultado, aspecto_pedido, es_estructura, leer_archivo, normalizar,
+    oraciones_completas, partir_foco, terminos,
+)
 
 logging.basicConfig(format="%(asctime)s %(levelname)s %(name)s: %(message)s", level=logging.INFO)
 logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -70,7 +73,9 @@ Para un solo apartado usa los botones de abajo de cada respuesta, o escríbelo:
 • /embriologia corazón
 
 También entiendo:
-• 5 detalles anatómicos del fémur
+• células del tejido óseo
+• detalles anatómicos del húmero
+• 5 características histológicas del estómago
 • 3 figuras del corazón
 • ¿Cuáles son las relaciones del estómago?
 
@@ -122,6 +127,10 @@ def _puntos(oraciones: list[Resultado], numerados: bool = False) -> str:
 
 
 def _cabecera(simbolo: str, titulo: str, tema) -> str:
+    palabras = titulo.strip(" ¿?¡!.").split()
+    while len(palabras) > 1 and normalizar(palabras[0]) in VACIAS:  # «dime las células…» → «células…»
+        palabras.pop(0)
+    titulo = " ".join(palabras)
     return f"{simbolo} {titulo.strip().upper()}\n📖 {tema.titulo} · se trata desde la {tema.etiqueta} {tema.ancla}"
 
 
@@ -135,9 +144,10 @@ _DE_FIGURA = (
     "figura foto imagen lamina esquema cuadro dibujo ilustracion fotografia"
 )
 _PEDIDO = re.compile(
-    rf"\b(\d{{1,2}}|{'|'.join(_NUMEROS)})\s+({'|'.join(sorted((_DE_LISTA + ' ' + _DE_FIGURA).split(), key=len, reverse=True))})\b"
+    rf"\b(?:(\d{{1,2}}|{'|'.join(_NUMEROS)})\s+)?({'|'.join(sorted((_DE_LISTA + ' ' + _DE_FIGURA).split(), key=len, reverse=True))})\b"
     r"((?:\s+(?:mas\s+)?(?:anatomic|histologic|embriologic|fisiologic|funcional|important|principal|microscopic)\w*)*)"
 )
+_SOLO_CON_NUMERO = set("datos puntos aspectos cosas elementos ideas partes dato punto aspecto cosa elemento idea parte cuadros cuadro".split())
 _ADJETIVOS = {"anatomic": "anatomia", "histologic": "histologia", "microscopic": "histologia", "embriologic": "embriologia",
               "fisiologic": "fisiologia", "funcional": "fisiologia"}
 
@@ -152,8 +162,10 @@ def pedido(pregunta: str) -> tuple[str, int, str | None, str] | None:
     if not hallado:
         return None
     numero, nombre, adjetivos = hallado.groups()
-    cantidad = max(1, min(int(numero) if numero.isdigit() else _NUMEROS[numero], 10))
-    aspecto = {"funciones": "fisiologia", "funcion": "fisiologia", "relaciones": "relaciones", "relacion": "relaciones"}.get(nombre)
+    if numero is None and nombre in _SOLO_CON_NUMERO:
+        return None  # «las partes del estómago» es una pregunta, no un pedido de lista
+    cantidad = 5 if numero is None else max(1, min(int(numero) if numero.isdigit() else _NUMEROS[numero], 10))
+    aspecto = {"funciones": "fisiologia", "funcion": "fisiologia", "relaciones": "anatomia", "relacion": "anatomia"}.get(nombre)
     for raiz, clave in _ADJETIVOS.items():
         if raiz in adjetivos:
             aspecto = clave
@@ -193,6 +205,13 @@ def preparar(pregunta: str, aspecto: str | None) -> tuple[str, list[Resultado], 
     """Arma la respuesta sin IA. Devuelve (texto, párrafos usados, páginas donde buscar figuras)."""
     if aspecto is None and aspecto_pedido(pregunta):  # «histología del estómago»
         aspecto, pregunta = aspecto_pedido(pregunta)
+    if aspecto is None and "?" not in pregunta and partir_foco(pregunta):  # «células del tejido óseo»
+        foco, tema_pedido = partir_foco(pregunta)
+        hallado = biblioteca.sobre(tema_pedido, foco)
+        if hallado and hallado[1]:
+            tema, oraciones = hallado
+            texto = _cabecera("🔎", pregunta, tema) + "\n\n" + _puntos(oraciones)
+            return texto, biblioteca.parrafos(tema, oraciones), [(r.titulo, r.pagina) for r in oraciones]
     if aspecto in ASPECTOS or es_estructura(pregunta):
         # Lo esencial de un tema, todo del libro donde se trata.
         hallado = biblioteca.esenciales(pregunta, 6 if aspecto else 3, aspecto)
@@ -212,8 +231,20 @@ def preparar(pregunta: str, aspecto: str | None) -> tuple[str, list[Resultado], 
     resultados = biblioteca.buscar(pregunta, 6, aspecto)
     if not resultados:
         return None
-    texto = "\n\n".join(f"📖 {r.fuente}\n{recortar(desde_oracion(r.texto))}" for r in resultados[:3])
-    return texto, resultados, [(r.titulo, r.pagina) for r in resultados[:3]]
+    # Una pregunta se contesta con las oraciones que más la responden, no con el párrafo entero.
+    buscadas = set(terminos(pregunta))
+    puntos = []
+    for r in resultados[:4]:
+        for oracion in oraciones_completas(r.texto):
+            comunes = len(buscadas & set(terminos(oracion)))
+            if comunes >= max(1, len(buscadas) // 2):
+                puntos.append((comunes, len(puntos), Resultado(r.titulo, r.pagina, r.etiqueta, oracion)))
+    if puntos:
+        mejores = [p[2] for p in sorted(sorted(puntos, key=lambda p: (-p[0], p[1]))[:5], key=lambda p: p[1])]
+        texto = f"🔎 {pregunta.strip()}\n\n" + "\n".join(f"• {r.texto} ({r.fuente})" for r in mejores)
+        return texto, resultados, [(r.titulo, r.pagina) for r in mejores]
+    r = resultados[0]
+    return f"📖 {r.fuente}\n{recortar(desde_oracion(r.texto), 500)}", resultados, [(r.titulo, r.pagina)]
 
 
 async def enviar_figuras(update: Update, figuras: list[tuple[str, bytes]]) -> None:

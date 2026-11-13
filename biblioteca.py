@@ -535,6 +535,10 @@ class Biblioteca:
                         continue
                     vistas.add(oracion)
                     presenta = bool(define and define.search(normalizar(oracion)))
+                    # Fuera de la parte donde se trata el tema, solo valen las oraciones que hablan de él
+                    # (lo nombran al empezar), no las que lo mencionan de pasada.
+                    if pagina not in cerca and not presenta and rara not in terminos(oracion)[:4]:
+                        continue
                     mejor, valor = None, 0
                     for aspecto in ASPECTOS:
                         fuertes, debiles = _PALABRAS[aspecto]
@@ -556,6 +560,40 @@ class Biblioteca:
                 if mejores:
                     elegidas[aspecto] = [c[3] for c in mejores]
             return tema, elegidas
+
+    def sobre(self, tema_pedido: str, foco: str, n: int = 5) -> tuple[Tema, list[Resultado]] | None:
+        """Un punto concreto dentro de un tema: «células» del «tejido óseo», «cabeza» del «húmero».
+
+        Devuelve las oraciones del libro del tema que hablan de ese punto, primero las de la parte
+        donde se trata el tema. None si el tema apenas se menciona en los libros.
+        """
+        with self._candado:
+            tema = self.tema(tema_pedido)
+            del_foco = set(terminos(foco))
+            if not tema or not del_foco:
+                return None
+            principales = set(terminos(tema_pedido))
+            rara = max(principales, key=self._idf)
+            cerca = set(tema.paginas)
+            if sum(self._cuenta_pagina[(tema.titulo, p)][rara] for p in tema.paginas) < 4:
+                return None  # una mención suelta no es un tema
+            candidatas, vistas, orden = [], set(), 0
+            for i, (titulo, pagina, etiqueta, texto, encabezado) in enumerate(self._filas):
+                if titulo != tema.titulo or not (pagina in cerca or self._cuentas[i][rara]):
+                    continue
+                if any(not self._cuentas[i][t] for t in del_foco):
+                    continue
+                for oracion in oraciones_completas(texto):
+                    palabras = set(terminos(oracion))
+                    if not del_foco <= palabras or oracion in vistas:
+                        continue
+                    vistas.add(oracion)
+                    enumera = ":" in oracion or oracion.count(",") >= 2  # «son: osteoblastos, osteocitos y…»
+                    valor = 2 * (pagina in cerca) + 2 * bool(principales & palabras) + enumera
+                    candidatas.append((valor, -orden, orden, Resultado(titulo, pagina, etiqueta, oracion, encabezado or "", valor, i)))
+                    orden += 1
+            mejores = sorted(sorted(candidatas, key=lambda c: c[:2], reverse=True)[:n], key=lambda c: c[2])
+            return tema, [c[3] for c in mejores]
 
     def parrafos(self, tema: Tema, oraciones: list[Resultado], maximo: int = 10) -> list[Resultado]:
         """Los párrafos completos de donde salieron esas oraciones (y el arranque del tema), para dar contexto."""
@@ -609,6 +647,23 @@ def _definicion(principales: list[str]) -> re.Pattern | None:
         rf"\b(?:el|la|los|las)\s+(?:\w+\s+){{0,3}}?{re.escape(principales[-1])}\w{{0,3}}\s+"
         r"(?:es|son|esta|estan|constituye|constituyen|tiene|tienen|presenta|presentan|posee|forma|forman|se\s+\w+)\b"
     )
+
+
+def oraciones_completas(texto: str, maximo: int = 380) -> list[str]:
+    """Las oraciones enteras de un párrafo: empiezan con mayúscula, terminan en punto y se pueden repasar."""
+    partes = (o.strip() for o in re.split(r"(?<=[.!?])\s+(?=[A-ZÁÉÍÓÚÑ])", texto))
+    return [o for o in partes if 40 <= len(o) <= maximo and o[0].isupper() and o[-1] == "."]
+
+
+def partir_foco(consulta: str) -> tuple[str, str] | None:
+    """«células del tejido óseo» → ("células", "tejido óseo"): un punto concreto y el tema donde buscarlo."""
+    partes = re.split(r"\s+(?:del|de\s+las?|de\s+los|de|en\s+el|en\s+la)\s+", consulta.strip(" ¿?.!"), flags=re.I)
+    for corte in range(len(partes) - 1, 0, -1):  # el tema es lo último: «sistema de conducción | del corazón»
+        foco = " ".join(partes[:corte])
+        tema = " ".join(partes[corte:])
+        if terminos(foco) and 0 < len(terminos(tema)) <= 3:
+            return foco, tema
+    return None
 
 
 def aspecto_pedido(consulta: str) -> tuple[str, str] | None:
