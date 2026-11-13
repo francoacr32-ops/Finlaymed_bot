@@ -238,7 +238,8 @@ def preparar(pregunta: str, aspecto: str | None) -> tuple[str, list[Resultado], 
                 texto = "\n\n".join(partes)
             paginas = [(r.titulo, r.pagina) for r in usadas] + [(tema.titulo, p) for p in tema.paginas]
             return texto, biblioteca.parrafos(tema, usadas), paginas
-        if aspecto is None:
+        # El tema está en los libros pero ninguna oración lo presenta: se muestran las que lo nombran.
+        if aspecto is None and not biblioteca.tema(pregunta):
             return None
     resultados = biblioteca.buscar(pregunta, 6, aspecto)
     if not resultados:

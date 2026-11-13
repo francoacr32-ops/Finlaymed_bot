@@ -419,6 +419,10 @@ class Chat(unittest.TestCase):
         asyncio.run(bot.al_escribir(self.update(texto="órgano de la visión"), contexto))
         self.assertEqual(self.enviados[-1][0], bot.NO_ENCONTRE)
 
+        # Un tema que el libro solo nombra de pasada: se muestran esas menciones, no «no encontré».
+        asyncio.run(bot.al_escribir(self.update(texto="hipogloso"), contexto))
+        self.assertIn("• Sus ramos se relacionan con el nervio hipogloso y son anteriores, posteriores y mediales. (Tomo III, pág. 160)", self.enviados[-1][0])
+
     def test_pedidos_con_cantidad(self):
         self.assertEqual(bot.pedido("Muéstrame 5 detalles anatómicos del corazón"), ("lista", 5, "anatomia", "muestrame del corazon"))
         self.assertEqual(bot.pedido("tres figuras del tejido epitelial")[:3], ("figuras", 3, None))
